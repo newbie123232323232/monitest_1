@@ -1,0 +1,27 @@
+MONI — Uptime-style monitoring (bản chốt)
+
+Tổng quan
+- SPA Vue gọi API FastAPI; Postgres (một DB duy nhất); Redis + Celery + Celery Beat.
+- Triển khai: Docker trên VPS; RabbitMQ tính sau (không dùng ở giai đoạn đầu).
+- Kiến trúc: layered + REST; ranh giới “microservice cơ bản”: API / worker Celery / gửi cảnh báo (có thể cùng worker).
+
+Auth
+- Email + mật khẩu; verify email qua Gmail SMTP khi đăng ký.
+- OAuth Google.
+- Phiên SPA: JWT access (ngắn) + refresh.
+
+Monitor
+- Loại: HTTP(S), TCP, ICMP (ping). Schema/API có đủ ba loại từ đầu.
+- Thứ tự code: lát cắt dọc HTTP → TCP → ICMP (ping cần quyền/OS đặc biệt trên Docker/VPS).
+
+Cảnh báo
+- Chỉ email qua Gmail SMTP (kênh khác sau).
+
+Sản phẩm
+- Dự án cá nhân: không phân gói/role.
+- Không public status page / không SEO.
+
+Biến môi trường
+- File .env ở thư mục gốc. Quy ước dev/prod (URL, OAuth, `DATABASE_URL`, Redis/Celery/Beat, CORS, VITE): planning-docs/ENV-CONVENTIONS.md
+
+Tài liệu chi tiết + cây thư mục dự kiến: planning-docs/PROJECT-PLAN.md

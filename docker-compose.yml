@@ -1,0 +1,15 @@
+# Postgres dev tùy chọn — app đọc DATABASE_URL từ .env (localhost hoặc container).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: moni
+      POSTGRES_PASSWORD: "123456"
+      POSTGRES_DB: moni
+    ports:
+      - "5432:5432"
+    volumes:
+      - moni_pgdata:/var/lib/postgresql/data
+
+volumes:
+  moni_pgdata:
