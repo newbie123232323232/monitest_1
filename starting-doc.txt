@@ -1,27 +1,69 @@
-MONI — Uptime-style monitoring (bản chốt)
+MONI - Product and Data Design Brief
 
-Tổng quan
-- SPA Vue gọi API FastAPI; Postgres (một DB duy nhất); Redis + Celery + Celery Beat.
-- Triển khai: Docker trên VPS; RabbitMQ tính sau (không dùng ở giai đoạn đầu).
-- Kiến trúc: layered + REST; ranh giới “microservice cơ bản”: API / worker Celery / gửi cảnh báo (có thể cùng worker).
+1) Product context
+- MONI is an uptime-focused monitoring product built as a single-team project.
+- Core user value: add a target -> monitor availability/performance -> receive alerts on failure/recovery.
+- Current production model is intentionally simple: one tenant scope per account, no role/package hierarchy.
 
-Auth
-- Email + mật khẩu; verify email qua Gmail SMTP khi đăng ký.
-- OAuth Google.
-- Phiên SPA: JWT access (ngắn) + refresh.
+2) Solution architecture (current baseline)
+- Frontend: Vue SPA.
+- Backend API: FastAPI (REST, layered architecture).
+- Database: PostgreSQL (single primary database).
+- Async runtime: Redis + Celery worker + Celery Beat scheduler.
+- Deployment: Docker on VPS with reverse proxy and TLS.
+- Messaging note: RabbitMQ is intentionally deferred; Redis is the only queue backend in this phase.
 
-Monitor
-- Loại: HTTP(S), TCP, ICMP (ping). Schema/API có đủ ba loại từ đầu.
-- Thứ tự code: lát cắt dọc HTTP → TCP → ICMP (ping cần quyền/OS đặc biệt trên Docker/VPS).
+3) Functional scope
+- Authentication:
+  - Email/password registration and login.
+  - Email verification via Gmail SMTP.
+  - Google OAuth login.
+  - SPA session with short-lived access token + refresh token flow.
+- Monitoring:
+  - Target types in schema/API: HTTP(S), TCP, ICMP.
+  - Delivery order: HTTP first, then TCP, then ICMP (ICMP needs OS/container capability handling).
+- Alerting:
+  - Email-only channel in MVP.
+  - Additional channels are planned after core monitoring quality is stable.
+- Product boundaries:
+  - No public status page in this phase.
+  - No SEO/public growth scope in this phase.
 
-Cảnh báo
-- Chỉ email qua Gmail SMTP (kênh khác sau).
+4) Business analysis framing
+- Primary actor: authenticated end user who owns monitors.
+- Primary jobs-to-be-done:
+  - Create and maintain monitors.
+  - Detect outages/performance degradation quickly.
+  - Investigate checks/incidents history.
+  - Receive actionable failure/recovery alerts.
+- Success criteria:
+  - Reliable state transitions (up/down/slow/checking/pending/paused).
+  - Deterministic run-check behavior and scheduler behavior.
+  - Inspectable history for operational decisions.
 
-Sản phẩm
-- Dự án cá nhân: không phân gói/role.
-- Không public status page / không SEO.
+5) Database structure overview (conceptual)
+- `users`: account identity and authentication ownership.
+- `refresh_tokens`: token/session continuity and revocation support.
+- `monitors`: target configuration and current snapshot status.
+- `check_runs`: immutable execution records for each monitoring attempt.
+- `incidents`: outage lifecycle (opened/closed) derived from check transitions.
+- `alert_events`: notification audit trail (channel, event type, send status).
 
-Biến môi trường
-- File .env ở thư mục gốc. Quy ước dev/prod (URL, OAuth, `DATABASE_URL`, Redis/Celery/Beat, CORS, VITE): planning-docs/ENV-CONVENTIONS.md
+Key relationships:
+- One user -> many monitors.
+- One monitor -> many check_runs.
+- One monitor -> many incidents.
+- One incident -> many alert_events.
+- One monitor -> many alert_events (directly queryable for operations history).
 
-Tài liệu chi tiết + cây thư mục dự kiến: planning-docs/PROJECT-PLAN.md
+Design intent:
+- Keep snapshot fields on `monitors` for fast list/dashboard rendering.
+- Keep event/history tables (`check_runs`, `incidents`, `alert_events`) append-oriented for auditability and analytics.
+- Use soft-delete behavior where needed to preserve historical context.
+
+6) Operational and environment conventions
+- Root `.env` is the runtime source for backend and worker processes.
+- URL/OAuth/CORS and environment conventions are defined in:
+  - `planning-docs/ENV-CONVENTIONS.md`
+- Detailed implementation plan, milestones, and progress tracking:
+  - `planning-docs/PROJECT-PLAN.md`

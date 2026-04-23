@@ -1,56 +1,77 @@
 # MONI Smoke Checklist
 
-Muc tieu: chot ship confidence truoc khi merge/release local dev.
+## Purpose
+
+Use this checklist to decide whether release confidence is sufficient after meaningful changes.
+It combines:
+
+- scripted smoke (fast and repeatable)
+- manual UI smoke (real user flow validation)
+- incident/alert smoke (when SMTP + scheduler are enabled)
+
+## How to use
+
+1. Run scripted smoke first to catch hard failures early
+2. Run manual UI smoke on core product paths
+3. If alerting is in scope, run incident/alert smoke
+4. Mark release as ready only when done criteria pass
+
+## Coverage
+
+- service health and reachability
+- authentication and dashboard/list reads
+- monitor lifecycle (create -> run check -> detail)
+- alert lifecycle (down -> recovered), when applicable
 
 ## 1) Preflight
 
-- Backend dang chay o `http://127.0.0.1:8010`
-- Frontend dang chay o `http://127.0.0.1:5173`
-- Celery worker + beat dang chay neu can test scheduler/incident flow
-- Co tai khoan da verify email de login UI
+- Backend running at `http://127.0.0.1:8010`
+- Frontend running at `http://127.0.0.1:5173`
+- Celery worker + beat running if scheduler/incident flow is being tested
+- At least one verified account available for login
 
-## 2) Scripted smoke (toi thieu)
+## 2) Scripted smoke (minimum)
 
-Chay script:
+Run:
 
 `powershell -ExecutionPolicy Bypass -File .\scripts\smoke-check.ps1`
 
-Neu co token:
+With token:
 
 `powershell -ExecutionPolicy Bypass -File .\scripts\smoke-check.ps1 -AccessToken "<jwt>"`
 
-Neu muon check 1 monitor cu the:
+With monitor scope:
 
 `powershell -ExecutionPolicy Bypass -File .\scripts\smoke-check.ps1 -AccessToken "<jwt>" -MonitorId "<uuid>"`
 
 Expected:
 
-- Tất cả step `[PASS]`
-- Cuoi script: `Smoke summary: N/N steps passed.`
+- every step returns `[PASS]`
+- final line: `Smoke summary: N/N steps passed.`
 
 ## 3) Manual UI smoke
 
-- Login thanh cong, vao `Dashboard` duoc
-- Dashboard load du cards + recent lists, khong error banner
+- Login succeeds and dashboard is reachable
+- Dashboard loads cards and recent lists without error banners
 - Monitors page:
-  - create monitor thanh cong
-  - run-check hien state queued/checking/completed hoac timeout ro rang
-  - list co pagination + risk field (`consecutive_failures`, `last_failure_at`)
+  - create monitor succeeds
+  - run-check shows clear state transitions (queued/checking/completed/timeout)
+  - list shows pagination and risk fields (`consecutive_failures`, `last_failure_at`)
 - Monitor detail:
-  - uptime range hoat dong (`To` mac dinh now)
-  - checks/incidents/alerts render table + sort/filter
-  - response-time chart 24h/7d render khi du data
-  - export CSV checks theo range tai duoc file
+  - uptime range works (`To` defaults to current time)
+  - checks/incidents/alerts tables render with sort/filter
+  - response-time chart 24h/7d renders when enough data exists
+  - CSV export downloads correctly for selected range
 
-## 4) Manual incident/alert smoke (neu SMTP + beat da bat)
+## 4) Manual incident/alert smoke (if SMTP + beat enabled)
 
-- Trigger monitor down -> tao incident open + alert event
-- Recover monitor -> dong incident + alert recovered
-- Kiem tra alerts history trong detail map dung event/send status
+- Trigger monitor down -> incident opens + alert event logged/sent
+- Recover monitor -> incident closes + recovered alert logged/sent
+- Verify alert history in detail matches expected event and send status
 
 ## 5) Done criteria
 
-- Script smoke pass
-- Manual UI smoke pass
-- (Neu ap dung) incident/alert smoke pass
-- Khong co error regression moi trong backend tests/frontend build
+- scripted smoke passes
+- manual UI smoke passes
+- incident/alert smoke passes when in release scope
+- no new regression errors in backend tests or frontend build

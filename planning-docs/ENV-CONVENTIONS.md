@@ -1,31 +1,57 @@
-# Quy ước URL & môi trường (dev / prod)
+# URL and Environment Conventions (dev / prod)
 
-Áp dụng từ đầu khi code để dev và prod chỉ khác biến môi trường, không khác đường dẫn API.
+## Purpose
 
-## Phân vai
+This document standardizes environment variables and URL contracts so that:
 
-| Biến | Ý nghĩa |
+- development and production differ by values, not API path structure
+- OAuth callback configuration is consistent
+- CORS behavior is predictable
+- DB/Redis/Celery config stays aligned across local and production
+
+## Quick start
+
+Read in this order:
+
+1. `APP_BASE_URL` and `API_PUBLIC_URL`
+2. Development or Production blocks
+3. Frontend API base conventions
+4. PostgreSQL / Redis / Celery sections
+5. CORS section
+
+## Core principles
+
+- API prefix is fixed: `/api/v1`
+- OAuth redirect URI must match exactly between:
+  - backend env (`GOOGLE_OAUTH_REDIRECT_URI`)
+  - Google Cloud Console
+- Vite env variables (`VITE_*`) are loaded from the frontend directory
+- `DATABASE_URL` uses the asyncpg dialect for backend runtime
+
+## Variable roles
+
+| Variable | Meaning |
 |------|--------|
-| `APP_BASE_URL` | Origin của **Vue SPA** (link trong email verify, redirect sau login). **Không** có `/` cuối. |
-| `API_PUBLIC_URL` | Origin của **FastAPI** mà browser hoặc Google redirect tới. **Không** có `/` cuối. |
+| `APP_BASE_URL` | Origin of the **Vue SPA** (verify-email links, post-login redirects). No trailing `/`. |
+| `API_PUBLIC_URL` | Public origin of **FastAPI** used by browser and Google OAuth callbacks. No trailing `/`. |
 
-## Đường dẫn API (cố định mọi môi trường)
+## API path contract (fixed across environments)
 
-- Prefix REST: **`/api/v1`**
-- OAuth Google (server-side): callback do **backend** nhận  
+- REST prefix: **`/api/v1`**
+- Google OAuth callback handled by backend:  
   **`GET {API_PUBLIC_URL}/api/v1/auth/google/callback`**
 
-Mọi chỗ trong code (authorize URL, `redirect_uri` gửi Google, đăng ký Google Console) dùng **đúng một chuỗi** trùng `GOOGLE_OAUTH_REDIRECT_URI` trong `.env`.
+All places in code and cloud config must use the same callback URI string defined by `GOOGLE_OAUTH_REDIRECT_URI`.
 
-## Development (mặc định khi code local)
+## Development (local default)
 
-| Thành phần | URL |
+| Component | URL |
 |------------|-----|
 | SPA (Vite) | `http://localhost:5173` |
 | API (uvicorn) | `http://localhost:8000` |
 | Google OAuth redirect URI | `http://localhost:8000/api/v1/auth/google/callback` |
 
-Trong `.env` dev:
+Example `.env` values:
 
 ```env
 APP_BASE_URL=http://localhost:5173
@@ -33,16 +59,16 @@ API_PUBLIC_URL=http://localhost:8000
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/v1/auth/google/callback
 ```
 
-**Google Cloud Console → OAuth client (Web):**
+Google Cloud Console (OAuth client, Web):
 
-- **Authorized JavaScript origins:** `http://localhost:5173`
-- **Authorized redirect URIs:** `http://localhost:8000/api/v1/auth/google/callback`
+- Authorized JavaScript origins: `http://localhost:5173`
+- Authorized redirect URIs: `http://localhost:8000/api/v1/auth/google/callback`
 
 ## Production (VPS + HTTPS)
 
-Đặt tên miền ví dụ (thay bằng miền thật của bạn):
+Example domain mapping:
 
-| Thành phần | URL ví dụ |
+| Component | Example URL |
 |------------|-----------|
 | SPA | `https://app.example.com` |
 | API | `https://api.example.com` |
@@ -53,120 +79,117 @@ API_PUBLIC_URL=https://api.example.com
 GOOGLE_OAUTH_REDIRECT_URI=https://api.example.com/api/v1/auth/google/callback
 ```
 
-**Google Console (cùng OAuth client hoặc client prod riêng):**
+Google Cloud Console:
 
-- **Authorized JavaScript origins:** `https://app.example.com`
-- **Authorized redirect URIs:** `https://api.example.com/api/v1/auth/google/callback`
+- Authorized JavaScript origins: `https://app.example.com`
+- Authorized redirect URIs: `https://api.example.com/api/v1/auth/google/callback`
 
-## Frontend gọi API
+## Frontend API base
 
-Đặt trong **`frontend/.env`** hoặc **`.env.development`** / **`.env.production`** (Vite chỉ đọc `VITE_*` từ thư mục frontend):
+Set in `frontend/.env` or `frontend/.env.development` / `frontend/.env.production` (Vite reads only `VITE_*` from frontend scope):
 
-- **Dev (khuyến nghị):** `VITE_API_BASE_URL` **để trống** — `fetch('/api/v1/...')` cùng origin với Vite; **`vite.config.ts`** proxy `/api` → backend (mặc định `http://127.0.0.1:8010`). **Không cần CORS** giữa SPA và API.
-- **Dev (gọi thẳng API):** `VITE_API_BASE_URL=http://127.0.0.1:8010` — backend dev phải bật CORS (hiện tại dev dùng `allow_origins=["*"]`).
-- **Prod:** `VITE_API_BASE_URL=https://api.example.com` — không dùng proxy Vite trên server tĩnh.
+- Dev (recommended): leave `VITE_API_BASE_URL` empty and call `/api/v1/...` via Vite proxy (`vite.config.ts` -> `http://127.0.0.1:8010`). This avoids cross-origin CORS during local development.
+- Dev (direct API call): set `VITE_API_BASE_URL=http://127.0.0.1:8010` and ensure backend CORS is enabled for that origin.
+- Prod: set `VITE_API_BASE_URL=https://api.example.com` (no Vite proxy in static hosting).
 
-Giữ **`/api/v1`** trong router FastAPI; URL đầy đủ: `(VITE_API_BASE_URL hoặc '') + "/api/v1/..."`.
+Final API URL pattern remains: `(VITE_API_BASE_URL or '') + '/api/v1/...'`.
 
 ## PostgreSQL (`DATABASE_URL`)
 
-Dùng **một** Postgres cho toàn app (API + worker Celery cùng DB). Chuỗi kết nối cho **SQLAlchemy async + asyncpg**:
+Single Postgres instance is used by API and worker flows. Async SQLAlchemy URL format:
 
 ```text
 postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DATABASE
 ```
 
-### Bảng khớp pgAdmin ↔ `.env` (dev — tránh nhầm)
+### pgAdmin <-> `.env` alignment (dev)
 
-Dùng **cùng một bộ** giá trị cho pgAdmin và cho `DATABASE_URL` trong `.env`:
+Use the same credentials in pgAdmin and `.env`:
 
-| Trường trong pgAdmin (Connect / Register Server) | Giá trị chốt (dev local) |
+| pgAdmin field | Local dev value |
 |--------------------------------------------------|-------------------------|
-| **Server name** | `MONI local` (chỉ là nhãn trong pgAdmin, không nằm trong `.env`) |
-| **Host name/address** | `localhost` |
-| **Port** | `5432` |
-| **Database** | `moni` |
-| **User** | `moni` |
-| **Password** | Trùng mật khẩu trong chuỗi `DATABASE_URL` (mặc định doc: `moni_local_dev` — đổi thì sửa cả Postgres và `.env`) |
+| Server name | `MONI local` (display label only) |
+| Host | `localhost` |
+| Port | `5432` |
+| Database | `moni` |
+| User | `moni` |
+| Password | must match `DATABASE_URL` |
 
-Chuỗi tương ứng trong `.env`:
+Example:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://moni:moni_local_dev@localhost:5432/moni
 ```
 
-**Lần đầu tạo user/database** (psql hoặc Query Tool, chạy với quyền superuser):
+First-time SQL setup (superuser):
 
 ```sql
 CREATE USER moni WITH PASSWORD 'moni_local_dev';
 CREATE DATABASE moni OWNER moni;
 ```
 
-Nếu đổi mật khẩu: đổi trong Postgres **và** cập nhật `DATABASE_URL`; ký tự đặc biệt trong mật khẩu phải **URL-encode** trong URL.
+If password changes, update both Postgres and `DATABASE_URL`. URL-encode special characters in the password.
 
-| Phần | Dev local | Prod (Docker/VPS) |
+| Part | Dev local | Prod (Docker/VPS) |
 |------|-----------|---------------------|
-| `USER` / `DATABASE` | `moni` / `moni` (như bảng trên) | Tùy server; cùng nguyên tắc: `.env` = pgAdmin |
-| `HOST` | `localhost` | Tên service Docker (`postgres`) hoặc `localhost` nếu bind port |
-| `PORT` | `5432` | Thường `5432` |
-| `PASSWORD` | Như đã tạo user | Biến môi trường an toàn |
+| `USER` / `DATABASE` | usually `moni` / `moni` | project-specific |
+| `HOST` | `localhost` | Docker service (`postgres`) or host binding |
+| `PORT` | `5432` | usually `5432` |
+| `PASSWORD` | local setup value | secure env value |
 
-**Không** dùng prefix `postgresql://` thuần nếu code cấu hình driver `asyncpg` — giữ đúng `postgresql+asyncpg://` như quy ước dự án.
+Do not switch to plain `postgresql://` in runtime where asyncpg is expected.
 
-**Postgres 15+ — `permission denied for schema public` (Alembic / migrate):** User thường phải được quyền trên `public`, chạy bằng superuser:
+Postgres 15+ note for schema permissions:
 
 `GRANT ALL ON SCHEMA public TO moni;`  
-(hoặc `ALTER DATABASE moni OWNER TO moni;` tùy cách bạn tạo DB.)
+or set DB owner accordingly.
 
 ## Redis (`REDIS_URL`)
 
-Redis dùng cho **Celery broker** + **result backend** (và có thể cache sau). Định dạng chuẩn:
+Redis is used for Celery broker and result backend. Format:
 
 ```text
 redis://[PASSWORD@]HOST:PORT/DBINDEX
 ```
 
-Ví dụ dev không mật khẩu, database logic `0`:
+Local example:
 
 ```env
 REDIS_URL=redis://localhost:6379/0
 ```
 
-| Phần | Ý nghĩa |
+| Part | Meaning |
 |------|--------|
-| `HOST` / `PORT` | Mặc định `6379`; trong Compose thường host là tên service `redis` |
-| `DBINDEX` | `0`–`15`; `/0` đủ cho MVP (broker + result cùng instance; tách `/0` và `/1` là tùy chọn sau) |
-| Có mật khẩu | `redis://:yourpassword@localhost:6379/0` (dấu `:` trước password) |
+| `HOST` / `PORT` | default `6379`; in Compose usually `redis` |
+| `DBINDEX` | `0`-`15`; `/0` is enough for MVP |
+| Password form | `redis://:yourpassword@host:port/0` |
 
-**Cách có dev nhanh:**
+Local setup options:
 
-1. Cài Redis (Linux/WSL) hoặc image `redis:7-alpine` trong Docker; trên Windows có thể WSL2 + Redis hoặc chỉ Docker.
-2. Kiểm tra: `redis-cli -u redis://localhost:6379/0 ping` → `PONG`.
-3. Điền `REDIS_URL` như trên.
+1. Install Redis locally or run `redis:7-alpine` in Docker
+2. Verify with `redis-cli -u redis://localhost:6379/0 ping` -> `PONG`
+3. Set env values accordingly
 
-Prod: cùng format, `HOST` là hostname nội bộ VPS/Docker; bật `requirepass` thì nhét password vào URL như bảng trên.
-
-**Redis Cloud (Redis Labs / GCP):** Dashboard cung cấp public endpoint + user (thường `default`) + password. Chuỗi dạng:
+Redis Cloud format:
 
 `redis://default:PASSWORD@HOST:PORT/0`
 
-Nếu client bắt buộc TLS, thử `rediss://` cùng host/port (xem tài liệu subscription). `redis-cli -u "..." ping` là cách kiểm tra nhanh trước khi gắn vào Celery.
+If TLS is required, use `rediss://...`.
 
-### Celery & Beat (biến môi trường)
+### Celery and Beat variables
 
-| Biến | Vai trò |
+| Variable | Role |
 |------|--------|
-| `CELERY_BROKER_URL` | Hàng đợi task (thường **trùng** `REDIS_URL` dev). |
-| `CELERY_RESULT_BACKEND` | Lưu kết quả / trạng thái task (thường **trùng** broker hoặc cùng host, DB Redis khác ví dụ `/1`). |
+| `CELERY_BROKER_URL` | task queue broker |
+| `CELERY_RESULT_BACKEND` | task state/result backend |
 
-**Celery Beat** (lịch `crontab` / `beat_schedule`) **không có biến env riêng**: chạy process `celery -A <app> beat`, dùng **cùng** `CELERY_BROKER_URL` với worker. Chỉ cần đảm bảo worker + beat trỏ cùng app Celery và cùng Redis broker.
-
-Khi code backend, có thể `CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL")` để dev chỉ cần `REDIS_URL` nếu muốn gọn — hiện `.env` đã ghi đủ cả ba cho rõ ràng.
+Celery Beat has no dedicated env variable; it uses the same app and broker settings as worker.
 
 ## CORS
 
-Backend cho phép origin từ `APP_BASE_URL`. Ở **`APP_ENV=development`**, API thêm **`allow_origin_regex`** khớp `http://localhost:*` và `http://127.0.0.1:*` (mọi cổng) cùng với cặp origin từ `APP_BASE_URL` — tránh **`Failed to fetch`** do CORS khi đổi cổng Vite hoặc khi response lỗi (5xx) khiến trình duyệt báo thiếu header CORS.
+Backend origin policy is anchored to `APP_BASE_URL`.
 
-Đăng ký: nếu SMTP lỗi, API trả **503** + `smtp_failed` (không còn 500 không rõ nguyên nhân).
+- In development, backend may allow localhost/127.0.0.1 flexible origins to avoid local CORS friction.
+- In production, keep strict origin policy to real HTTPS origins only.
 
-Prod: không dùng regex dev; chỉ `APP_BASE_URL` (HTTPS) thật.
+Note: when SMTP fails during registration flow, API should return explicit `smtp_failed` with 503 rather than generic 500.

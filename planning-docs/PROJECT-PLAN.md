@@ -1,60 +1,115 @@
-# MONI — Plan triển khai chi tiết (cập nhật sau khi hoàn thành Auth cơ bản)
+# MONI — Detailed Project Plan
 
-## 1) Mục tiêu MVP
+## Document purpose and reading order
 
-Xây MONI theo luồng "thêm website -> hệ thống check định kỳ -> user thấy trạng thái ngay -> cảnh báo khi fail".
-Ưu tiên tính đúng, ổn định, dễ vận hành hơn thêm nhiều tính năng trình diễn.
+This document is the source of truth for project scope, architecture, progress, and execution decisions.
+It is designed so that new contributors can quickly understand:
 
-## 2) Trạng thái hiện tại (đã làm xong)
+1. what MONI is solving (MVP objective and product scope)
+2. which architecture and stack are in use (API, worker, scheduler, frontend)
+3. how work is phased (M1 -> M4)
+4. what technical guardrails are mandatory
+5. how to run and verify locally
 
-### Backend/Auth
-- FastAPI + SQLAlchemy async + Alembic + PostgreSQL đã chạy ổn.
-- Auth local: register, verify email (GET/POST), login, refresh, logout.
-- Google OAuth: start + callback backend + trả token về SPA callback route.
-- `JWT` access/refresh đang dùng được.
-- Bổ sung xử lý lỗi dev để debug rõ traceback.
-- Sửa luồng register để account chưa verify có thể đăng ký lại cùng email (không bị "kẹt" do data rác).
+Recommended reading order:
+- `1) MVP Objective`
+- `3) MVP Scope (in / out)`
+- `4) UI flow -> backend feature mapping`
+- `9) Delivery milestones`
+- `12) Architecture decisions`
+- `13+) Progress, gap checks, and next execution order`
 
-### Frontend/Auth
-- Vue Router đã có `/login`, `/register`, `/verify-email`, `/auth/callback`.
-- API client auth xử lý lỗi rõ hơn (parse `detail.message`, code, traceback dev).
-- Vite proxy dev hoạt động (`/api` -> backend) để tránh lỗi CORS khi dev.
+## Project snapshot (executive summary)
 
-### Hạ tầng local
-- Backend dev chuẩn: `127.0.0.1:8010`.
-- Frontend dev chuẩn: `127.0.0.1:5173`.
-- `.env` callback Google đã chỉnh về `http://localhost:8010/api/v1/auth/google/callback`.
+- Product shape: uptime-style website monitoring app, optimized for correctness and operational stability.
+- Current baseline:
+  - Authentication (local + Google OAuth) is implemented.
+  - HTTP monitoring vertical slice is implemented (CRUD -> check -> incident -> alert).
+  - Dashboard / Monitors / Detail UI is usable with polling.
+  - Security hardening has started (SSRF guard, rate limits, security middleware/headers).
+- Delivery strategy:
+  - vertical slices over broad abstraction
+  - polling first, websocket later
+  - HTTP first, TCP/ICMP later
 
-## 3) Scope còn lại cho MVP Monitoring
+## Architecture and operational context
 
-### Có trong MVP
-- Dashboard tổng quan.
-- CRUD monitor HTTP(S) đầy đủ.
-- Chạy check định kỳ qua Celery Beat + worker.
-- Trigger check thủ công (Run Check Now).
-- Website detail: summary + history + response-time chart + lỗi gần nhất.
-- Trạng thái: `UP`, `DOWN`, `PENDING`, `CHECKING`, `PAUSED`, `SLOW`.
-- Incident cơ bản + gửi email cảnh báo Gmail SMTP.
-- Location-based monitoring (chon vi tri probe cho moi monitor).
+- Monorepo layout:
+  - `backend`: FastAPI + SQLAlchemy async + Alembic + Celery
+  - `frontend`: Vue 3 + Vue Router + typed API client
+  - `planning-docs`: specs, checklists, conventions, smoke/runbooks
+- Core runtime flow:
+  - API receives monitor config and user actions.
+  - Celery Beat enqueues due checks.
+  - Worker executes HTTP checks, updates monitor snapshot, opens/closes incidents.
+  - Alert task sends SMTP email and writes `alert_events`.
+- Core data model:
+  - `monitors`, `check_runs`, `incidents`, `alert_events`
 
-### Không đưa vào MVP vòng này
-- Status page public.
-- Realtime websocket (dùng polling).
-- SSO nhiều provider ngoài Google.
-- Rule cảnh báo đa kênh (Slack/Telegram/SMS).
-- Multi-location consensus check (3-5 locations, >50% fail moi mark DOWN).
+## Change management note
 
-## 4) Mapping user flow UI -> backend feature
+The detailed sections below intentionally keep status markers and historical decisions.
+- Checklist markers `[x]/[ ]/[~]` are used for progress tracking.
+- Gap and next-batch sections are used for execution prioritization.
+- Historical context is preserved to avoid decision drift.
+
+## 1) MVP objective
+
+Build MONI around this flow:
+add website -> run scheduled checks -> show status immediately -> alert on failures.
+
+Priority is correctness, reliability, and operability over feature breadth.
+
+## 2) Current status (completed baseline)
+
+### Backend / Auth
+- FastAPI + SQLAlchemy async + Alembic + PostgreSQL are stable.
+- Local auth: register, verify email (GET/POST), login, refresh, logout.
+- Google OAuth: start + backend callback + token handoff to SPA callback route.
+- `JWT` access/refresh flow is working.
+- Development error handling includes traceback for debugging.
+- Register flow fixed so unverified accounts can re-register safely (no deadlock on stale data).
+
+### Frontend / Auth
+- Vue Router includes `/login`, `/register`, `/verify-email`, `/auth/callback`.
+- Auth API client has clearer error parsing (`detail.message`, code, dev traceback).
+- Vite proxy (`/api` -> backend) works in dev to avoid CORS friction.
+
+### Local environment
+- Backend dev default: `127.0.0.1:8010`
+- Frontend dev default: `127.0.0.1:5173`
+- `.env` Google callback aligned to `http://localhost:8010/api/v1/auth/google/callback`
+
+## 3) MVP scope (remaining / fixed)
+
+### In-scope for MVP
+- Dashboard overview
+- Full HTTP(S) monitor CRUD
+- Scheduled checks via Celery Beat + worker
+- Manual trigger (`Run Check Now`)
+- Website detail: summary + history + response-time chart + latest errors
+- Status model: `UP`, `DOWN`, `PENDING`, `CHECKING`, `PAUSED`, `SLOW`
+- Basic incident flow + SMTP email alerts
+- Location-aware probe field (`probe_region`)
+
+### Out-of-scope in this MVP cycle
+- Public status page
+- Realtime websocket updates (polling only)
+- Non-Google SSO providers
+- Multi-channel alerts (Slack/Telegram/SMS)
+- Multi-location consensus logic (3-5 probes, majority-fail downing)
+
+## 4) UI flow -> backend feature mapping
 
 ### 4.1 Dashboard
-Hiển thị:
+Displays:
 - total monitors
-- up/down/pending/checking
-- average response time (N lần check gần nhất)
+- up/down/pending/checking counts
+- average response time
 - recent monitors
 - recent failures
 
-API tối thiểu:
+Minimum APIs:
 - `GET /api/v1/dashboard/summary`
 - `GET /api/v1/dashboard/recent-monitors`
 - `GET /api/v1/dashboard/recent-failures`
@@ -63,26 +118,26 @@ API tối thiểu:
 Form:
 - name, url, interval_seconds, timeout_seconds, detect_content_change (bool), slow_threshold_ms
 
-Hành vi:
-- tạo monitor thành công -> enqueue first check ngay.
-- UI thấy trạng thái `PENDING` hoặc `CHECKING`.
+Behavior:
+- after create, enqueue first check immediately
+- UI should show `PENDING` or `CHECKING`
 
 API:
 - `POST /api/v1/monitors`
-- nội bộ: enqueue task `check_http_monitor(monitor_id)`.
+- internal enqueue: `check_http_monitor(monitor_id)`
 
-### 4.3 Websites List
-Cột:
+### 4.3 Websites list
+Columns:
 - name, url, current_status, latest_response_time_ms, last_checked_at, interval
 
 Filter/search:
-- filter: all/up/down/slow/paused
+- status: all/up/down/slow/paused
 - search: name/url
 
 API:
 - `GET /api/v1/monitors?status=&q=&page=&page_size=`
 
-### 4.4 Website Detail
+### 4.4 Website detail
 Summary:
 - name, url, current status, last checked, current response, uptime%
 
@@ -92,9 +147,9 @@ Actions:
 - edit config
 - delete
 
-Nội dung:
+Content:
 - status history table
-- response time line chart
+- response-time line chart
 - latest metadata (title, final_url, content_type, status_code)
 - latest logs/errors
 
@@ -105,21 +160,21 @@ API:
 - `PATCH /api/v1/monitors/{id}`
 - `DELETE /api/v1/monitors/{id}`
 
-### 4.5 Trigger check thủ công
-- UI đổi trạng thái `QUEUED/CHECKING`, polling 5s đến khi job xong.
-- Không dùng websocket ở bản đầu.
+### 4.5 Manual run-check UX
+- UI transitions through `QUEUED/CHECKING` and polls every 5s until completion.
+- No websocket in first release.
 
-### 4.6 DOWN và SLOW UX
-- DOWN: block cảnh báo rõ failed_at, error_type, retries, last_success.
-- SLOW: hiển thị cảnh báo mềm theo threshold.
-- Tránh gộp SLOW vào DOWN để user phân biệt degradation vs outage.
+### 4.6 DOWN and SLOW UX policy
+- DOWN: show failed_at, error_type, retry details, last_success.
+- SLOW: soft degradation warning based on threshold.
+- Keep SLOW distinct from DOWN (degradation vs outage).
 
-## 5) Thiết kế dữ liệu (MVP - HTTP first)
+## 5) Data model design (MVP, HTTP-first)
 
-## `monitors`
+### `monitors`
 - id (uuid), user_id, name, url
 - monitor_type (`http`)
-- probe_region (vd: `ap-southeast-1`, `eu-central-1`) de ho tro location-based monitoring
+- probe_region (e.g., `ap-southeast-1`, `eu-central-1`) for location-aware probing
 - interval_seconds, timeout_seconds, max_retries
 - slow_threshold_ms
 - detect_content_change (bool)
@@ -127,9 +182,9 @@ API:
 - current_status (`pending|checking|up|down|slow|paused`)
 - last_checked_at, last_response_time_ms, last_status_code
 - last_error_message, last_success_at
-- created_at, updated_at, deleted_at (nullable cho soft delete)
+- created_at, updated_at, deleted_at (nullable for soft delete)
 
-## `check_runs`
+### `check_runs`
 - id, monitor_id
 - status (`up|down|slow|timeout|dns_error|tls_error|http_error`)
 - started_at, finished_at, response_time_ms
@@ -138,123 +193,123 @@ API:
 - dns_resolve_ms, tcp_connect_ms, tls_handshake_ms, ttfb_ms
 - retry_count
 
-## `incidents`
+### `incidents`
 - id, monitor_id
 - opened_at, closed_at, status (`open|closed`)
 - open_reason, close_reason
 - first_failed_check_id, last_failed_check_id
 
-## `alert_events`
+### `alert_events`
 - id, incident_id, monitor_id, channel (`email`)
 - event_type (`incident_opened|incident_recovered|still_down`)
 - sent_to, sent_at, provider_message_id, send_status, error_message
 
-Ghi chú:
-- TCP/ICMP thêm sau, không ép abstraction sớm khi HTTP chưa ổn.
+Note:
+- TCP/ICMP comes later; avoid premature abstraction before HTTP path is fully stable.
 
-## 6) Worker + scheduler flow
+## 6) Worker and scheduler flow
 
 ### Beat
-- mỗi N giây/phút enqueue monitor active.
-- skip monitor `is_paused=true` hoặc `deleted_at != null`.
+- enqueue active monitors every fixed interval
+- skip monitors with `is_paused=true` or `deleted_at != null`
 
-### Worker check HTTP
+### Worker HTTP check flow
 1. set `current_status=checking`
-2. thực hiện HTTP request theo timeout/retries
-3. do metrics ky thuat: DNS resolve time, TCP connect time, TLS handshake, TTFB
-4. ghi `check_runs`
-5. tính trạng thái `up/down/slow`
-6. update snapshot ở `monitors`
-7. mở/đóng incident nếu đổi trạng thái
-8. enqueue email task khi mở/đóng incident
+2. execute HTTP request with timeout/retry
+3. collect technical metrics (DNS/TCP/TLS/TTFB)
+4. write `check_runs`
+5. compute `up/down/slow`
+6. update monitor snapshot
+7. open/close incidents on transition
+8. enqueue email task for open/close transitions
 
-### Chính sách retry (MVP)
-- retry nhanh trong cùng task: ví dụ `max_retries=2`.
-- nếu fail toàn bộ -> `DOWN`.
-- nếu thành công nhưng response_time vượt threshold -> `SLOW`.
+### Retry policy (MVP)
+- fast retries within a single task (e.g. `max_retries=2`)
+- all retries fail -> `DOWN`
+- request succeeds but exceeds threshold -> `SLOW`
 
-## 7) API contract chi tiết cho monitor (MVP)
+## 7) Monitor API contract (MVP)
 
 ### Create monitor
 - `POST /api/v1/monitors`
 - body:
   - `name`, `url`, `interval_seconds`, `timeout_seconds`, `max_retries`, `slow_threshold_ms`, `detect_content_change`
-- validate:
-  - interval >= 30s (MVP anti abuse)
+- validation:
+  - interval >= 30s
   - timeout <= interval
-  - url phải là http/https
+  - URL must be http/https
 
 ### Update monitor
 - `PATCH /api/v1/monitors/{id}`
-- cho phép sửa: name/url/interval/timeout/max_retries/threshold/detect_content_change/is_paused
-- đổi config có hiệu lực cho lần check kế tiếp.
+- editable fields: name/url/interval/timeout/max_retries/threshold/detect_content_change/is_paused
+- changes apply on next check
 
 ### Run check now
 - `POST /api/v1/monitors/{id}/run-check`
-- trả `202 Accepted` + `job_id` + trạng thái `queued`.
+- returns `202 Accepted` + `job_id` + `queued`
 
 ### Delete monitor
 - `DELETE /api/v1/monitors/{id}`
-- MVP: soft delete để không mất lịch sử audit.
+- MVP behavior: soft delete to preserve audit/history
 
-## 8) Frontend plan theo page
+## 8) Frontend page plan
 
 ### Page 1: Dashboard
-- Stats cards, recent monitors, recent failures.
-- Polling nhẹ mỗi 30s.
+- stats cards, recent monitors, recent failures
+- light polling every 30s
 
-### Page 2: Websites List
-- table + filter + search + pagination.
-- row actions: `View Detail`, `Run Check Now`.
+### Page 2: Websites list
+- table + filter + search + pagination
+- row actions: `View Detail`, `Run Check Now`
 
-### Page 3: Website Detail
-- summary + actions + chart + history + logs.
-- khi run check now: polling 5s đến khi trạng thái ổn định.
+### Page 3: Website detail
+- summary + actions + chart + history + logs
+- run-check-now polls every 5s until stable state
 
-### Modal
+### Modals
 - Add Website
 - Edit Website
 
-## 9) Ưu tiên triển khai (milestone thực thi)
+## 9) Delivery milestones
 
-## M1 - HTTP vertical slice end-to-end
-- model + migration cho `monitors`, `check_runs`, `incidents`.
-- monitor CRUD + list/filter/search.
-- celery task check HTTP + beat schedule.
-- run-check-now endpoint.
-- dashboard summary API cơ bản.
+### M1 - HTTP vertical slice end-to-end
+- models + migrations (`monitors`, `check_runs`, `incidents`)
+- monitor CRUD + list/filter/search
+- Celery HTTP check task + beat schedule
+- run-check-now endpoint
+- basic dashboard summary API
 
-## M2 - UX hoàn thiện cho monitoring
-- dashboard cards + recent failures.
-- list/status badges + detail page.
-- chart response time.
-- block cảnh báo DOWN/SLOW rõ ràng.
-- hien thi metrics DNS/TCP/TLS/TTFB tren detail.
+### M2 - Monitoring UX completion
+- dashboard cards + recent failures
+- list/status badges + detail page
+- response-time chart
+- clear DOWN/SLOW warning blocks
+- show DNS/TCP/TLS/TTFB metrics in detail
 
-## M3 - Alerting ổn định
-- email incident opened/recovered.
-- dedupe gửi mail (không spam mỗi lần beat chạy).
-- logs alert events.
-- SMTP-only (giu scope alert channel gon cho MVP).
+### M3 - Alerting stability
+- email incident opened/recovered
+- dedupe to avoid mail spam on each beat cycle
+- alert event logging
+- SMTP-only to keep MVP scope lean
 
-## M4 - hardening trước mở rộng TCP/ICMP
-- rate limit, concurrency guard.
-- retention check_runs.
-- test integration cho worker flow.
+### M4 - Hardening before TCP/ICMP expansion
+- rate limits, concurrency safeguards
+- check_runs retention policy
+- integration tests for worker flow
 
-## 10) Checklist kỹ thuật bắt buộc
+## 10) Mandatory technical checklist
 
-- Test:
-  - unit: status calculation / incident transition.
-  - integration: create monitor -> run check -> open incident -> recover.
+- Testing:
+  - unit: status calculation and incident transitions
+  - integration: create -> check -> incident open -> recover
 - Observability:
-  - structured logs cho API + worker.
-  - endpoint health: db, redis, worker heartbeat.
+  - structured logs for API + worker
+  - health checks: db, redis, worker heartbeat
 - Security:
-  - validate URL đầu vào tránh SSRF cơ bản (deny private ranges ở MVP nếu có thể).
-  - giới hạn interval tối thiểu để tránh abuse.
+  - input URL validation for basic SSRF defense (deny private ranges when possible)
+  - minimum interval enforcement against abuse
 
-## 11) Runbook dev hiện tại
+## 11) Current development runbook
 
 1. Backend:
    - `cd backend`
@@ -267,115 +322,115 @@ Ghi chú:
    - `npm install`
    - `npx vite --host 127.0.0.1 --port 5173 --strictPort`
 
-3. Worker/Beat (khi vào phase monitoring):
+3. Worker/Beat (monitoring phase):
    - `cd backend`
    - `py -3 -m celery -A app.workers.celery_app worker -P solo -l info` (Windows)
    - `py -3 -m celery -A app.workers.celery_app beat -l info`
 
-## 12) Quyết định kiến trúc chốt
+## 12) Final architecture decisions
 
-- Monorepo, không tách microservice sớm.
-- HTTP monitor làm chuẩn trước rồi mới mở TCP/ICMP.
-- Polling thay websocket cho bản đầu.
-- Dùng trạng thái `SLOW` riêng, không trộn với `DOWN`.
-- Tập trung hoàn thiện core monitoring trước khi làm profile/change-password.
-- Ho tro location-based monitoring; chua lam consensus da-vung o M1.
-- Advanced metrics scope: DNS resolve, TCP connect, TLS handshake, TTFB (khong lam full page load trong M1).
+- Monorepo, no early microservice split
+- HTTP monitor first, TCP/ICMP later
+- polling over websocket for first release
+- keep `SLOW` separate from `DOWN`
+- finish core monitoring before profile/change-password extras
+- include `probe_region` field early; postpone multi-region consensus in M1
+- advanced metrics scope in M1: DNS resolve, TCP connect, TLS handshake, TTFB (not full page load)
 
-## 13) M1 progress update (latest)
+## 13) Latest M1 progress update
 
-- Day 1 done: da co schema monitoring core (`monitors`, `check_runs`, `incidents`, `alert_events`) + migration.
-- Day 2 done: monitor CRUD, filter/search, ownership check, soft delete, `run-check-now` endpoint.
-- Create monitor da enqueue first check ngay sau khi save.
-- Co integration test bao phu ownership + filter/search + run-check.
-- Day 3 in progress: task HTTP da co retry theo `max_retries`, mapping timeout/dns/tls/http errors, va unit tests logic check.
-- Da them `probe_region` cho location-based monitoring co ban.
-- Da them metrics ky thuat vao check run: `dns_resolve_ms`, `tcp_connect_ms`, `tls_handshake_ms`, `ttfb_ms`.
-- Da expose endpoint `GET /api/v1/monitors/{id}/checks` de UI/doc co du lieu metrics chi tiet.
-- Day 4 da implement backend core:
-  - incident transition `DOWN -> open`, `UP/SLOW -> close`.
-  - alert email task SMTP (`incident_opened`, `incident_recovered`) + log `alert_events`.
-  - beat schedule enqueue monitor den han (30s).
-- Day 5 backend API da them:
-  - `GET /api/v1/dashboard/summary`, `/recent-monitors`, `/recent-failures`.
-  - `GET /api/v1/monitors/{id}/checks`, `/incidents`, `/alerts`.
-- Uptime percentage, range query (`from/to`) va UI wiring cho dashboard/detail da implement (summary + monitor uptime/checks, detail co From/To).
-- Day 6 UI toi thieu da khoi dong:
-  - Da them route/page `dashboard` va `monitors` voi typed API client rieng.
-  - Dashboard da render stats cards + recent monitors + recent failures.
-  - Monitors page da co create monitor co ban, monitor table, `Run Check` action, va xem nhanh checks gan nhat.
-  - Van con pending cho Day 6: filter/search, polling den khi check xong, va detail page day du.
+- Day 1 done: monitoring schema (`monitors`, `check_runs`, `incidents`, `alert_events`) + migration.
+- Day 2 done: monitor CRUD, filter/search, ownership checks, soft delete, `run-check-now`.
+- Create monitor now enqueues first check immediately.
+- Integration tests cover ownership + filter/search + run-check.
+- Day 3 in progress: HTTP task retries (`max_retries`), timeout/dns/tls/http mapping, unit tests.
+- Added `probe_region` for basic location-aware monitoring.
+- Added technical metrics in check run: `dns_resolve_ms`, `tcp_connect_ms`, `tls_handshake_ms`, `ttfb_ms`.
+- Exposed `GET /api/v1/monitors/{id}/checks` for detailed metrics in UI/docs.
+- Day 4 backend core implemented:
+  - incident transitions (`DOWN -> open`, `UP/SLOW -> close`)
+  - SMTP alert task (`incident_opened`, `incident_recovered`) + `alert_events` logging
+  - beat schedule enqueues due monitors every 30s
+- Day 5 backend APIs added:
+  - `GET /api/v1/dashboard/summary`, `/recent-monitors`, `/recent-failures`
+  - `GET /api/v1/monitors/{id}/checks`, `/incidents`, `/alerts`
+- Uptime percentage and range query (`from/to`) are wired into dashboard/detail.
+- Day 6 UI minimum has started:
+  - routes/pages for `dashboard` and `monitors` with typed API clients
+  - dashboard renders stats + recent monitors + recent failures
+  - monitors page supports basic create, monitor table, run-check, recent checks preview
+  - pending on Day 6: full filter/search polish, deterministic polling UX, complete detail page
 
 ## 14) Decision after manual testing
 
-- Manual test da pass cho luong auth + monitor create/run-check + dashboard failure listing.
-- Chot huong tiep theo: lam UI co ban ngay (khong cho backend "xong het"), theo vertical slice.
-- Nguyen tac de tranh viet lai nhieu khi vao Vue:
-  - API contract first: tao typed API client/stores truoc, UI consume qua layer nay.
-  - UI thin layer: page/component khong embed business logic network.
-  - Reuse payload hien co (`dashboard`, `checks`, `incidents`, `alerts`) thay vi tao endpoint moi khong can thiet.
-  - Keep route skeleton som (`/dashboard`, `/monitors`, `/monitors/:id`) de on dinh navigation va state shape.
-  - Build UI MVP first (read + basic actions), postpone styling polish.
+- Manual tests passed for auth + monitor create/run-check + dashboard failure listing.
+- Decision: ship base UI now via vertical slice (do not wait for all backend polish).
+- Principles to avoid rewrite cost in Vue:
+  - API contract first: typed API layer before page logic
+  - thin UI pages/components (no embedded network business logic)
+  - reuse existing payloads (`dashboard`, `checks`, `incidents`, `alerts`) before adding endpoints
+  - keep route skeleton early (`/dashboard`, `/monitors`, `/monitors/:id`) for stable navigation/state
+  - ship MVP usability first, postpone visual polish
 
 ## 15) Gap check vs plan + next priorities (updated)
 
-- Chua xong o UI:
-  - [x] Edit monitor tren UI (backend `PATCH` da duoc consume tren `Monitors` page).
-  - [x] List filter/search co ban.
-  - [x] Detail page route `/monitors/:id` consume checks/incidents/alerts.
-  - [x] Pagination UI cho monitors list.
-  - [x] Run-check polling deterministic (queued/checking/completed/timeout/failed) tren list + detail.
-- ~~Chua xong o backend monitoring:~~ (done)
-  - [x] Uptime percentage (dashboard aggregate + per-monitor endpoint).
-  - [x] Range query `from/to` cho checks history va uptime (query params; checks default 30d neu bo trong).
-- Alert hardening chua day du:
-  - debounce/cooldown.
-  - still-down reminder theo chu ky.
-- Security hardening can uu tien:
-  - SSRF guard host/IP.
-  - rate limit cho `run-check-now`.
-  - validation FE/BE dong bo va ro loi.
+- Remaining UI items:
+  - [x] Edit monitor in UI (`PATCH` consumed in Monitors page)
+  - [x] Basic list filter/search
+  - [x] Detail route `/monitors/:id` consumes checks/incidents/alerts
+  - [x] Monitors pagination UI
+  - [x] Deterministic run-check polling on list + detail (queued/checking/completed/timeout/failed)
+- Backend monitoring core:
+  - [x] Uptime percentage (dashboard aggregate + per-monitor endpoint)
+  - [x] `from/to` range query for checks history and uptime (default 30d for checks)
+- Alert hardening not complete:
+  - debounce/cooldown
+  - still-down reminder cadence
+- Security hardening priorities:
+  - SSRF host/IP guard
+  - run-check-now rate limit
+  - clear FE/BE validation contract
 
-## 16) Execution order chot (product-first)
+## 16) Final execution order (product-first)
 
-1. Hardening toi thieu bat buoc (security/correctness):
-   - SSRF guard + run-check rate limit + validation chot.
-2. Hoan thien UI core flow:
-   - edit monitor, filter/search, monitor detail page.
+1. Mandatory hardening (security/correctness):
+   - SSRF guard + run-check rate limit + final validation contract
+2. Complete core UI flow:
+   - edit monitor, filter/search, monitor detail page
 3. Alert quality:
-   - debounce/cooldown/still-down.
+   - debounce/cooldown/still-down behavior
 4. Test + release confidence:
-   - integration/security tests va smoke checklist.
+   - integration/security tests + smoke checklist
 
 ## 17) Hardening package status (current)
 
-- [x] Bat dau SSRF guard:
-  - API create/update monitor block host noi bo (`localhost`, `.local`, private/internal IP literal).
-  - Worker check block target resolve vao private/internal IP (`blocked_target` error).
-- [x] Rate limit `run-check-now`:
-  - Block khi monitor dang `checking` (409).
-  - Block khi monitor vua check trong cua so toi thieu (`run_check_min_interval_seconds`, mac dinh 15s) (429).
-- [x] Tests cho SSRF/rate-limit path:
-  - API test SSRF deny localhost/private IP.
-  - API test run-check 429/409.
-  - Worker-level SSRF deny when DNS resolve private/internal IP.
-- [x] Auth/edge hardening bo sung:
-  - Auth rate limit cho `register/login/refresh` theo IP + subject.
-  - Production hardening middleware: trusted host, optional HTTPS redirect.
-  - Security headers (`CSP`, `X-Frame-Options`, `HSTS` o production).
-  - Production docs toggle (`expose_docs_in_production=false` mac dinh).
-  - Fail-fast: chan dev mode tren public host neu khong explicit allow.
+- [x] SSRF guard started:
+  - API create/update blocks local/private/internal host targets
+  - worker check blocks targets resolving to private/internal IP (`blocked_target`)
+- [x] `run-check-now` rate limit:
+  - block while monitor is `checking` (409)
+  - block if triggered within minimum interval (`run_check_min_interval_seconds`, default 15s) (429)
+- [x] Tests for SSRF/rate-limit:
+  - API tests for localhost/private IP rejection
+  - API tests for 429/409 run-check behavior
+  - worker-level SSRF tests for private/internal DNS resolution
+- [x] Additional auth/edge hardening:
+  - auth rate limit for register/login/refresh by IP + subject
+  - production middleware hardening (trusted host, optional HTTPS redirect)
+  - security headers (`CSP`, `X-Frame-Options`, `HSTS` in production)
+  - docs toggle (`expose_docs_in_production=false` by default)
+  - fail-fast guard for unsafe dev mode on public host
 
-## 18) Next batch agreed (post-M1 polish)
+## 18) Agreed next batch (post-M1 polish)
 
 - [~] Detail presentation upgrade:
-  - [x] checks/incidents/alerts dang table + sort/filter nhe.
-  - [x] response-time chart 24h/7d.
-  - [x] export CSV checks theo range tu detail page.
-- [x] Monitoring risk-prioritization data:
-  - them `last_failure_at` + `consecutive_failures` vao list/dashboard.
-- [x] Error contract standardization FE/BE:
-  - thong nhat payload loi `code + message`, khong chi chuoi detail.
-- [x] Smoke confidence package:
-  - manual checklist + script hoa toi thieu de chot ship confidence (`planning-docs/SMOKE-CHECKLIST.md`, `scripts/smoke-check.ps1`).
-  - [ ] Them npm/powershell shortcut command de chay smoke nhanh (defer sau).
+  - [x] checks/incidents/alerts as tables with lightweight sort/filter
+  - [x] response-time chart 24h/7d
+  - [x] checks CSV export by selected range
+- [x] Risk-prioritization data:
+  - add `last_failure_at` + `consecutive_failures` to list/dashboard
+- [x] FE/BE error contract standardization:
+  - consistent `code + message` payload
+- [x] Ship confidence package:
+  - manual checklist + minimum script automation (`planning-docs/SMOKE-CHECKLIST.md`, `scripts/smoke-check.ps1`)
+  - [ ] Add npm/powershell shortcut command for quick smoke run (deferred)

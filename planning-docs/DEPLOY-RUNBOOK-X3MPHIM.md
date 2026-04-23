@@ -1,82 +1,106 @@
 # Deploy Runbook - x3mphim.click
 
+## Purpose and scope
+
+This runbook documents production deployment for MONI using:
+- Docker Compose on a VPS
+- host-level Nginx reverse proxy on ports 80/443
+- GitHub Actions + GHCR image delivery
+
+This version is written for `x3mphim.click`.
+If the domain changes (for example `monitest.top`), keep the same process and update only domain/env/OAuth values.
+
+## High-level flow
+
+1. One-time VPS setup and folder structure
+2. Production environment wiring
+3. Nginx site + TLS provisioning
+4. GitHub secrets + deploy workflow
+5. Post-deploy verification
+6. Rollback path
+
+## Operational notes
+
+- Do not modify unrelated sites on the same VPS.
+- Always back up DB before migration.
+- Keep OAuth URLs in sync with production domain.
+
 This runbook deploys MONI to `x3mphim.click` without touching `myauction.fun`.
 
 ## 1) One-time setup on VPS
 
-1. Create project folder:
+1. Create project folders:
    - `mkdir -p /opt/moni`
    - `mkdir -p /opt/moni/backups`
-2. Copy these files from repo to `/opt/moni`:
+2. Copy deployment files into `/opt/moni`:
    - `docker-compose.prod.yml`
-   - `.env.prod.example` -> rename to `.env` and fill real secrets
+   - `.env.prod.example` -> rename to `.env` and fill real values
 3. Install/verify Docker Engine + Compose plugin on VPS.
-4. Keep host Nginx as public reverse proxy on `80/443`.
-5. Optional fast-path script (recommended after files are copied):
+4. Keep host Nginx as the public reverse proxy on `80/443`.
+5. Optional fast-path setup:
    - `sudo DOMAIN=x3mphim.click PROJECT_DIR=/opt/moni bash /opt/moni/deploy/vps-first-setup.sh`
 
 ## 2) Configure environment (`/opt/moni/.env`)
 
-Use `.env.prod.example` as baseline.
+Use `.env.prod.example` as the baseline.
 
-Rule agreed:
-- Change required values for Auth/JWT + CORS/OAuth/Base URLs.
-- Keep DB/Redis/Celery shape aligned with current local setup unless intentionally changed.
+Agreed rule:
+- change required values for Auth/JWT + CORS/OAuth/Base URLs
+- keep DB/Redis/Celery shape aligned with current local setup unless intentionally migrating
 
 Required production values:
 - `APP_ENV=production`
 - `APP_BASE_URL=https://x3mphim.click`
 - `API_PUBLIC_URL=https://x3mphim.click`
 - `GOOGLE_OAUTH_REDIRECT_URI=https://x3mphim.click/api/v1/auth/google/callback`
-- Strong `JWT_SECRET` (32+ chars, high entropy)
-- Real SMTP credentials
-- Real image tags for `BACKEND_IMAGE` and `FRONTEND_IMAGE`
+- strong `JWT_SECRET` (32+ chars, high entropy)
+- real SMTP credentials
+- real image tags for `BACKEND_IMAGE` and `FRONTEND_IMAGE`
 
-## 3) Configure Nginx host
+## 3) Configure host Nginx
 
 1. Copy `deploy/nginx/x3mphim.click.conf` to:
    - `/etc/nginx/sites-available/x3mphim.click`
-2. Enable site:
+2. Enable the site:
    - `ln -sf /etc/nginx/sites-available/x3mphim.click /etc/nginx/sites-enabled/x3mphim.click`
-3. Validate + reload:
+3. Validate and reload:
    - `nginx -t`
    - `systemctl reload nginx`
 
-Note: do not remove/modify `myauction.fun` site.
+Note: do not remove or modify `myauction.fun` site.
 
 ## 4) Issue TLS certificate (Let's Encrypt)
 
-If cert does not exist yet:
+If certificate does not exist:
 - `certbot --nginx -d x3mphim.click`
 
 Verify:
 - `certbot certificates`
 - `systemctl status certbot.timer --no-pager`
 
-## 5) GitHub secrets for workflow
+## 5) GitHub secrets required by workflow
 
-Repository secrets required:
 - `VPS_HOST`
 - `VPS_USER`
-- `VPS_PORT` (optional, defaults 22)
+- `VPS_PORT` (optional, defaults to 22)
 - `VPS_SSH_KEY`
 - `GHCR_USERNAME`
 - `GHCR_TOKEN` (package read access)
 
 ## 6) Deploy flow
 
-On push to `main`, workflow:
-1. Build backend/frontend images.
-2. Push images to GHCR (`sha` + `latest` tags).
-3. SSH to VPS and:
+On push to `main`, workflow does:
+1. Build backend and frontend images.
+2. Push images to GHCR (`sha` and `latest` tags).
+3. SSH into VPS and:
    - update image tags in `/opt/moni/.env`
-   - `docker compose pull`
-   - backup postgres (`/opt/moni/backups/*.sql`)
+   - run `docker compose pull`
+   - create postgres backup (`/opt/moni/backups/*.sql`)
    - run `alembic upgrade head`
-   - `docker compose up -d`
+   - run `docker compose up -d`
    - probe `http://127.0.0.1:8010/api/v1/health`
 
-Manual deploy command (if you need emergency deploy without Actions):
+Manual emergency deploy (without Actions):
 
 ```bash
 cd /opt/moni
@@ -90,13 +114,13 @@ curl -fsS http://127.0.0.1:8010/api/v1/health
 ## 7) Post-deploy verification
 
 1. Open `https://x3mphim.click`.
-2. Confirm API via browser/devtools:
+2. Verify API response:
    - `GET /api/v1/health` returns `{ "status": "ok" }`.
 3. Login with password.
 4. Login with Google OAuth.
 5. Open Dashboard/Monitors.
-6. Trigger `Run Check` and verify status updates.
-7. Optional: run smoke script from local with production base URLs.
+6. Trigger `Run Check` and validate state updates.
+7. Optional: run smoke script from local against production URLs.
 
 ## 8) Rollback
 
@@ -106,9 +130,9 @@ curl -fsS http://127.0.0.1:8010/api/v1/health
 2. Re-run:
    - `docker compose --env-file .env -f docker-compose.prod.yml pull`
    - `docker compose --env-file .env -f docker-compose.prod.yml up -d`
-3. If migration broke compatibility, restore latest DB backup from `/opt/moni/backups`.
+3. If migration is incompatible, restore latest DB backup from `/opt/moni/backups`.
 
-## 9) OAuth checklist (must update in Google Console)
+## 9) OAuth checklist (must update in Google Cloud Console)
 
 - Authorized JavaScript origins:
   - `https://x3mphim.click`
