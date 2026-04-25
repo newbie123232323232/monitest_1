@@ -24,6 +24,9 @@ MONI lets a user:
 - run checks on schedule and manually
 - track status history, incidents, and alerts
 - receive email alerts for outage/recovery
+- manage public/private status pages with selected monitor exposure
+- monitor SSL/domain expiry state and warning thresholds
+- configure monitor regions with explicit single active execution region
 
 The project is optimized for correctness and operability over feature sprawl.
 
@@ -43,6 +46,7 @@ The project is optimized for correctness and operability over feature sprawl.
 - `frontend/` - SPA application
 - `planning-docs/` - roadmap, checklists, environment/deploy runbooks
 - `scripts/` - smoke checks and utility scripts
+- `.github/workflows/` - CI build and deploy automation
 - `starting-doc.txt` - high-level BA/data-design brief
 - `docker-compose.prod.yml` - production compose stack
 - `.env.prod.example` - production env template
@@ -62,34 +66,45 @@ High-level runtime components:
 - `users` - account identity
 - `refresh_tokens` - session continuity/revocation
 - `monitors` - target config + latest snapshot
+- `probe_regions` - allowed region catalog
+- `monitor_regions` - monitor-to-region mapping
 - `check_runs` - immutable check execution history
 - `incidents` - outage lifecycle records
 - `alert_events` - notification audit trail
+- `status_pages` - public/private status page definitions
+- `status_page_monitors` - monitor exposure mapping for each status page
+- `monitor_expiry_status` - SSL/domain expiry snapshots + alert markers
 
 Relationship summary:
 - one user -> many monitors
 - one monitor -> many check runs
 - one monitor -> many incidents
 - one incident -> many alert events
+- one monitor -> many monitor_regions (with one `active_region` on monitor for execution)
+- one status_page -> many status_page_monitors
 
 ## Data flow
 
 1. User creates/updates a monitor via API.
 2. Beat enqueues check task when monitor is due.
-3. Worker executes check and records `check_runs`.
+3. Worker executes check in monitor `active_region` and records `check_runs`.
 4. Worker computes resulting monitor status (`up/down/slow/...`) and updates snapshot fields.
 5. Incident transition logic opens/closes incidents based on status transitions.
 6. Alert task sends email and writes `alert_events`.
-7. Frontend reads dashboard/list/detail endpoints and renders operational state.
+7. Expiry worker updates SSL/domain expiry state and threshold alert tracking.
+8. Frontend reads dashboard/list/detail/runtime endpoints and renders operational state.
+9. Status page endpoints expose selected monitor state publicly when page is public.
 
 ## User flow
 
 1. Register or sign in (email/password or Google OAuth).
-2. Create a monitor (name, URL, interval, timeout, thresholds).
-3. Observe status in Dashboard and Monitors list.
-4. Trigger manual run-check when needed.
-5. Investigate detail history (checks/incidents/alerts/chart).
-6. Receive down/recovered notifications by email.
+2. Create a monitor (name, URL, interval, timeout, thresholds, regions).
+3. Select monitor regions and set one active execution region.
+4. Observe status/region/expiry signals in Dashboard and Monitors list.
+5. Trigger manual run-check when needed.
+6. Investigate detail history (checks/incidents/alerts/chart/region summary).
+7. Create status pages and choose which monitors are publicly exposed.
+8. Receive down/recovered and expiry-related notifications by email.
 
 ## Local development quickstart
 
@@ -262,7 +277,7 @@ Production deploy safety note:
   - verify process count via `scripts/check_celery_runtime.ps1`
   - keep local Redis/Celery separate from production broker
 
-### 8) Dashboard appears slow even when API is up
+### 6) Dashboard appears slow even when API is up
 - Root cause seen in local hardening phase: dashboard core endpoints were fast, but runtime health path could be slow/intermittent and block page rendering.
 - Current mitigation:
   - runtime panel is not in dashboard critical render path
@@ -272,12 +287,12 @@ Production deploy safety note:
   - dashboard core cards load first
   - runtime card may refresh slightly later without freezing whole page
 
-### 6) Swagger docs appear blank or unavailable
+### 7) Swagger docs appear blank or unavailable
 - In production, docs are disabled by default with `EXPOSE_DOCS_IN_PRODUCTION=false`.
 - If enabled for temporary testing, ensure API is restarted and `/docs` route is reachable.
 - Docs route uses a dedicated CSP path policy; API routes keep strict CSP hardening.
 
-### 7) Backup script fails with unbound env vars
+### 8) Backup script fails with unbound env vars
 - Ensure backup script loads `.env` and references `POSTGRES_USER`/`POSTGRES_DB` from env.
 - Verify compressed backup integrity (`gzip -t`).
 
