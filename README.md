@@ -5,6 +5,18 @@
 
 MONI is an uptime-style monitoring system focused on reliable website checks, clear incident state transitions, and practical operational workflows.
 
+## Upgrade session highlights (current)
+
+This upgrade cycle completed a large backend+frontend hardening and feature block. The key additions are:
+
+- **Monitor contract migration:** from CSV probe regions to mapping table (`monitor_regions`) with explicit `active_region` execution model (resource-saving, one active region per cycle).
+- **Region catalog:** dedicated `probe_regions` API/model flow for controlled region selection.
+- **Status pages:** managed private/public status pages with monitor mapping and maintenance notes.
+- **SSL/domain expiry monitoring:** expiry status storage, check tasks, summary APIs, and alert threshold tracking.
+- **Runtime observability:** runtime health and queue profile APIs with dashboard integration.
+- **Operational hardening:** safer local restart scripts, strict Celery topology checks, and packaged smoke gate script.
+- **Deploy safety:** CI deploy pipeline now runs Alembic migration through the live `api` service container, then restarts `api/worker/beat` to keep code and schema synchronized.
+
 ## What this project does
 
 MONI lets a user:
@@ -206,11 +218,18 @@ Port note (important):
 1. Prepare VPS folders (`/opt/moni`, `/opt/moni/backups`).
 2. Configure `.env` from `.env.prod.example`.
 3. Configure Nginx site and issue TLS certificate.
-4. Start compose stack and run mig  rations.
+4. Start compose stack and run migrations.
 5. Verify health endpoint and login flows.
 6. Configure GitHub Actions secrets for CI deploy.
 
 See detailed runbook in `planning-docs/DEPLOY-RUNBOOK-X3MPHIM.md` (adapt domain values if needed).
+
+Production deploy safety note:
+- Deploy workflow now performs migration with:
+  - `docker compose ... up -d api`
+  - `docker compose ... exec -T api alembic upgrade head`
+  - `docker compose ... restart api worker beat`
+- This order prevents "new code / old schema" mismatch after image rollout.
 
 ## Common issues when cloning / modifying / self-deploying
 
@@ -283,6 +302,30 @@ Use these docs as your onboarding map:
 
 - `planning-docs/DEPLOY-RUNBOOK-X3MPHIM.md`  
   Production deploy and rollback workflow on VPS with Nginx + Docker Compose + GH Actions.
+
+- `planning-docs/MONITOR-REGION-RESOURCE-SAVING-PLAN.md`  
+  Region execution strategy, active-region rationale, and runtime/port discipline notes.
+
+- `upgrade_planning_docs_1`  
+  Full execution log for this upgrade cycle (what was done, test checkpoints, and remaining/closed items).
+
+## Quick access map for new files
+
+If you are onboarding and need the fastest path:
+
+- Start with feature scope/progress:
+  - `upgrade_planning_docs_1`
+  - `planning-docs/MONITOR-REGION-RESOURCE-SAVING-PLAN.md`
+- Then read deploy/runtime operations:
+  - `planning-docs/DEPLOY-RUNBOOK-X3MPHIM.md`
+  - `.github/workflows/deploy.yml`
+- Then use scripts directly:
+  - `scripts/restart_full_stack.ps1` (guarded local full restart)
+  - `scripts/restart_celery_runtime.ps1` (idempotent local celery restart)
+  - `scripts/check_celery_runtime.ps1` (strict topology check)
+  - `scripts/smoke-check.ps1` (API/frontend smoke checks)
+  - `scripts/smoke_local_gate.ps1` (one-command local pre-deploy gate)
+  - `scripts/smoke_alert_timeline_e2e.py` (incident alert timeline smoke)
 
 ## Project status
 
