@@ -346,3 +346,19 @@ If you are onboarding and need the fastest path:
 
 Core monitoring flow, auth, and deployment baseline are operational.  
 Current priorities are operational robustness (CI discipline, backup/restore confidence, incremental hardening) and controlled feature expansion.
+
+## Upgrade timeline (quick scan)
+
+Use this to understand major completed blocks in execution order:
+
+- **A1:** monitor `accepted_status_codes` end-to-end.
+- **A2:** incident alert policy upgrade (cooldown, still-down reminders, dedup).
+- **A3:** UX hardening for dashboard/detail clarity and empty states.
+- **B1:** status pages (private/public) + maintenance notes.
+- **B2:** SSL/domain expiry monitoring (worker checks, API, summary, alert thresholds).
+- **C1:** region evolution from raw probe tagging to catalog + monitor-region mapping.
+- **Resource-saving region execution:** one `active_region` per monitor check cycle.
+- **Runtime hardening:** heartbeat-based runtime health, queue profile, safer restart discipline.
+- **Deploy hardening:** migration-through-live-api sequence in CI deploy pipeline to prevent code/schema drift.
+
+For full implementation details and test notes, see `upgrade_planning_docs_1`.
