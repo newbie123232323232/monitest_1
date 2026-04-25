@@ -1,0 +1,539 @@
+# MONI - Upgrade Planning (Phase A/B)
+
+> NOTE - TEST SAFETY (BAT BUOC):
+> - Tuyet doi KHONG viet cleanup test theo kieu xoa rong (`delete(Table)` khong `where`, wildcard qua rong, truncate/drop trong test flow).
+> - Cleanup chi duoc phep xoa du lieu do chinh test tao ra, co scope ro rang (theo `user_id` test, slug/name prefix duy nhat, hoac ID vua tao).
+> - Tranh chay test tich hop vao DB dung cho smoke/UI thu cong; uu tien DB test rieng de tranh mat du lieu cuc bo.
+
+## 1) Muc tieu nang cap
+
+Mo rong MONI theo huong "giong san pham monitoring chuyen nghiep" nhung van giu duoc su don gian, tinh on dinh, va kha nang van hanh hien tai.
+
+Muc tieu business:
+- Giam false alert / giam alert noise.
+- Tang tinh "co the dung thuc te" cho team van hanh.
+- Bo sung tinh nang co gia tri cao truoc, tranh over-engineering.
+
+## 2) Pham vi uu tien (da chot)
+
+### Phase A (uu tien cao - lam truoc)
+1. Per-monitor status policy (`accepted_status_codes`)
+2. Alert policy upgrade (cooldown + still-down reminder + dedupe)
+3. UX hardening nhe cho Dashboard/Detail (message ro rang, khong "trong im lang")
+
+### Phase B (mo rong tiep theo)
+4. Basic status page (public/private)
+5. SSL + domain expiry monitoring
+
+Trang thai hien tai Phase B:
+- B1 backend API: DA HOAN TAT.
+- B1 frontend management/public page: DA HOAN TAT ban co ban.
+- B1 maintenance notes: DA HOAN TAT (backend + frontend + public page).
+- B2 SSL/domain expiry backend slice 1: DA HOAN TAT (SSL expiry status + API + scheduler hook).
+- B2 SSL/domain expiry backend slice 2: DA HOAN TAT (SSL threshold alert 30/14/7/1 + dedupe).
+
+### Phase C (sau cung)
+6. Multi-location checks (ban co ban, chua consensus)
+
+## 3) Nguyen tac thiet ke
+
+- Uu tien dong chay hien tai: khong pha API contract dang dung neu khong bat buoc.
+- Moi thay doi schema phai co migration va rollback note.
+- Feature moi phai co smoke path de test tren production.
+- Tranh tang abstraction khong can thiet.
+
+## 4) Ke hoach chi tiet - Phase A
+
+### Tinh trang trien khai thuc te (cap nhat moi nhat)
+- A1: DA HOAN TAT end-to-end (schema + migration + API + worker + UI + tests).
+- A2: DA HOAN TAT core policy (cooldown/reminder/dedupe + schema + migration + worker + notify + tests).
+- A3: DA HOAN TAT scope nhe (empty states + message ro rang tren Dashboard/Detail).
+- Fix bo sung sau trien khai:
+  - Da fix regression `dashboard/recent-*` thieu field `accepted_status_codes` gay 500.
+  - Da xac nhan local can chay du `api + worker + beat` de run-check khong bi queue treo.
+
+## A1) `accepted_status_codes` theo tung monitor
+
+### Gia tri
+- Xu ly duoc case endpoint tra 403/401 do WAF/auth layer nhung van duoc coi la "reachable".
+- Giam false DOWN trong cac monitor dac thu.
+
+### Thay doi du lieu
+- `monitors` them truong:
+  - `accepted_status_codes` (string) - vi du: `200-399`, `200,204,301-304,403`
+- Migrate:
+  - default = `200-399`
+  - backfill cho monitor cu
+  - DA LAM: migration `d9e8f7a6b5c4_add_accepted_status_codes_to_monitors.py`
+
+### Thay doi API
+- `POST /api/v1/monitors`: nhan them `accepted_status_codes` (optional)
+- `PATCH /api/v1/monitors/{id}`: cho update field nay
+- Validation:
+  - format hop le (`n` hoac `n-m`, list comma)
+  - range 100-599
+ - DA LAM:
+  - `GET /api/v1/monitors` va `GET /api/v1/monitors/{id}` tra ve `accepted_status_codes`
+  - Dashboard endpoints recent-* dong bo field nay de tranh response validation error
+
+### Thay doi worker
+- Parse `accepted_status_codes` thanh set/range matcher.
+- Khi nhan HTTP response:
+  - neu status_code thuoc accepted set -> duoc coi la success path (UP/SLOW tuy response time)
+  - nguoc lai -> `http_error` (DOWN)
+ - DA LAM: `check_http_monitor` su dung matcher theo policy per-monitor, khong hardcode `>=400` nua.
+
+### UI
+- Monitors create/edit: them input "Accepted status codes"
+- Tooltip vi du:
+  - `200-399` (default)
+  - `200,204,301-304,403`
+ - DA LAM:
+  - Monitors list/create/edit da co field nay
+  - Monitor detail hien thi policy hien tai
+
+### Test bat buoc
+- Unit:
+  - parser accepted status syntax
+  - matcher status in/out range
+- Integration:
+  - monitor with accepted `403` + endpoint 403 -> khong DOWN
+  - monitor default + endpoint 403 -> DOWN
+ - DA LAM:
+  - Unit tests parser/matcher + check logic pass
+  - API tests create/update + invalid format pass
+
+## A2) Alert policy upgrade
+
+### Gia tri
+- Giam spam email khi su co keo dai.
+- Van dam bao team khong bo lo su co dai han.
+
+### Thay doi cau hinh
+- Them env:
+  - `ALERT_COOLDOWN_MINUTES` (default 10)
+  - `ALERT_STILL_DOWN_REMINDER_MINUTES` (default 30)
+  - `ALERT_MAX_REMINDERS_PER_INCIDENT` (default 24)
+ - DA LAM: da add vao `Settings`, `.env.example`, `.env.prod.example`
+
+### Thay doi logic
+- Khi incident OPEN:
+  - gui `incident_opened` ngay lan dau
+  - trong cooldown, khong gui lap lai
+  - sau moi N phut, gui `still_down` reminder (neu chua recovered)
+- Khi recovered:
+  - gui `incident_recovered` 1 lan
+ - DA LAM:
+  - `still_down` chi gui khi qua cooldown + dung nhip reminder + chua vuot max reminder
+  - `incident_opened`/`incident_recovered` van giu semantics 1 su kien
+
+### Du lieu can luu
+- Co the can bo sung field tren incident:
+  - `last_alert_sent_at`
+  - `reminder_count`
+  (hoac tinh tu `alert_events`, tuy chon implement)
+ - DA LAM:
+  - bo sung truong tren `incidents`
+  - migration `e2f1d0c9b8a7_add_incident_alert_policy_fields.py`
+  - API incidents da tra ve 2 truong moi
+
+### Test bat buoc
+- Integration theo timeline:
+  - OPEN -> cooldown -> reminder -> RECOVERED
+  - assert dung so luong alert_events
+ - DA LAM:
+  - unit test helper timeline reminder pass
+  - manual smoke da xac nhan OPEN path
+ - CON THIEU:
+  - Khong con (da xac nhan e2e timeline OPEN -> STILL_DOWN -> RECOVERED)
+
+## A3) UX hardening nhe
+
+### Muc tieu
+- Khong de nguoi dung hieu nham "trong = loi he thong".
+
+### Scope nhe
+- Detail chart:
+  - neu <2 check co `response_time_ms`, hien "Not enough successful checks in selected window."
+- Dashboard:
+  - recent failures empty state ro rang
+  - (optional) recent alerts section neu da co API
+- Alert history:
+  - thong diep khi khong co du lieu thay vi vung trang
+ - DA LAM:
+  - Detail chart thong diep ro rang khi thieu data
+  - Checks/Incidents/Alerts co empty-state text
+  - Dashboard Recent Failures co empty-state text
+
+### Test
+- Manual smoke tren monitor moi tao (du lieu it)
+- Manual smoke tren monitor fail/recover
+
+## 5) Ke hoach chi tiet - Phase B
+
+## B1) Basic status page
+- Public/private mode
+- Chon monitor hien thi
+- Hien:
+  - current status
+  - incident timeline
+  - maintenance notes (optional)
+
+Cap nhat thuc te:
+- DA LAM (backend):
+  - Schema moi: `status_pages`, `status_page_monitors`
+  - Migration: `f4a3b2c1d0e9_add_status_pages_tables.py`
+  - Auth API:
+    - `GET /api/v1/status-pages`
+    - `POST /api/v1/status-pages`
+    - `PATCH /api/v1/status-pages/{page_id}`
+    - `DELETE /api/v1/status-pages/{page_id}`
+  - Public API:
+    - `GET /api/v1/public/status-pages/{slug}` (monitors + incidents timeline)
+  - Integration test: `test_status_pages_api.py`
+- DA LAM (frontend):
+  - Route quan ly: `/status-pages` (create/list/update/delete status pages)
+  - Route public: `/status/:slug` (hien monitor status + incident timeline)
+  - Navigation link trong app layout: `Status Pages`
+  - UI chon monitor da nang cap thanh table (filter realtime theo status + name/url, mac dinh moi -> cu)
+  - Fix UX filter text: filter theo tung ky tu, khong doi blur
+- CHUA LAM:
+  - Khong con.
+
+## B2) SSL + domain expiry monitoring
+- Tao monitor loai `ssl_expiry` / `domain_expiry` (hoac cron task dedicated)
+- Alert moc:
+  - 30/14/7/1 ngay truoc expiry
+
+Cap nhat thuc te:
+- DA LAM (backend slice 1):
+  - Schema moi: `monitor_expiry_status`
+  - Migration: `a9b8c7d6e5f4_add_monitor_expiry_status_table.py`
+  - Worker task:
+    - `check_monitor_expiry(monitor_id)` (SSL cert expiry via TLS handshake)
+    - `check_expiry_for_all_http_monitors()` (enqueue batch)
+  - Beat schedule:
+    - task `check-expiry-status` moi 30 phut
+  - API:
+    - `POST /api/v1/monitors/{monitor_id}/expiry-check` (manual trigger)
+    - `GET /api/v1/monitors/{monitor_id}/expiry` (read expiry status)
+  - States hien tai: `ok`, `warn_30d`, `warn_14d`, `warn_7d`, `warn_1d`, `expired`, `unknown`
+  - Test:
+    - `test_expiry_logic.py` (state threshold mapping)
+- DA LAM (backend slice 2):
+  - Theo doi threshold da gui cho SSL:
+    - `ssl_alerted_thresholds` (dedupe theo moc 30/14/7/1)
+  - Alert event moi:
+    - `ssl_expiry_warning`
+    - `domain_expiry_warning` (reserved, domain parser chua bat)
+  - Logic gui alert:
+    - moi lan check chi gui toi da 1 moc canh bao SSL moi
+    - reset threshold tracking khi phat hien cert duoc renew (expiry date tang)
+  - Migration:
+    - `b1c2d3e4f5a6_add_expiry_alert_threshold_tracking.py`
+  - Test:
+    - bo sung helper test cho threshold parse/serialize/next alert
+- CHUA LAM:
+  - (Da xong) Domain WHOIS expiry parser
+  - (Da xong) Alert event cho domain expiry moc 30/14/7/1 ngay
+  - (Da xong) Frontend hien thi expiry status tren dashboard
+
+Cap nhat bo sung (frontend):
+- DA LAM:
+  - Monitor detail hien thi panel expiry (ssl/domain state, days left, expiry time, last error)
+  - Nut `Run Expiry Check` tren monitor detail (queue task + refresh data)
+  - Dashboard hien thi `SSL Expiry Summary` (ok/warn_30d/warn_14d/warn_7d/warn_1d/expired/unknown)
+
+Cap nhat bo sung (backend slice 3):
+- DA LAM:
+  - WHOIS domain expiry parser (`python-whois`, normalize nhieu date formats)
+  - Domain threshold dedupe tracking: `domain_alerted_thresholds`
+  - Gui alert `domain_expiry_warning` theo moc 30/14/7/1, chong gui lap
+  - Auto reset threshold history khi domain expiry date tang (renew scenario)
+  - Test helper parser/normalization da pass
+
+Cap nhat bo sung (backend slice 4):
+- DA LAM:
+  - Them endpoint `GET /api/v1/dashboard/expiry-summary`
+  - Tong hop SSL expiry state theo user de phuc vu dashboard UI
+  - Fix reliability: batch expiry check xu ly inline (khong fanout enqueue task con)
+  - `GET /api/v1/monitors/{monitor_id}/expiry` co bootstrap lan dau neu chua co row (tranh queue tre + 404 keo dai)
+
+Cap nhat bo sung (B1 maintenance notes):
+- DA LAM:
+  - DB: them cot `status_pages.maintenance_notes` + migration `c9d8e7f6a5b4_add_maintenance_notes_to_status_pages.py`
+  - API: create/update/list/public response co field `maintenance_notes`
+  - UI manage `/status-pages`: them textarea maintenance notes khi create/edit
+  - UI public `/status/:slug`: hien section maintenance notes neu co noi dung
+
+## 6) Ke hoach chi tiet - Phase C
+
+## C1) Multi-location checks (ban co ban)
+- Chay check tu 2-3 regions
+- Hien thi ket qua tung region
+- Chua lam consensus downing trong phase nay
+
+Cap nhat thuc te (C1 - slice 1):
+- DA LAM:
+  - Luu `probe_region` tren moi `check_run` de co du lieu lich su theo region.
+  - API `GET /api/v1/monitors/{monitor_id}/checks` tra ve them truong `probe_region`.
+  - Worker check ghi `probe_region` tu monitor vao ban ghi check run.
+  - Migration: `d4e5f6a7b8c9_add_probe_region_to_check_runs.py`
+
+Cap nhat thuc te (C1 - slice 2):
+- DA LAM:
+  - Ho tro khai bao nhieu region tren `monitor.probe_region` theo format comma (vd: `global,us-east,eu-west`).
+  - Moi chu ky check: region dau tien duoc dung lam ket qua chinh (giu hanh vi cu), region phu chi de ghi nhan them check-runs.
+  - Khong bat consensus downing: status monitor van dua tren region chinh de tranh thay doi rui ro lon.
+  - Da retest truc tiep: 1 chu ky sinh du lieu `global`, `us-east`, `eu-west` trong `check_runs`.
+- CHUA LAM:
+  - Dashboard tong hop theo region.
+  - Consensus downing logic.
+
+Cap nhat thuc te (C1 - slice 3):
+- DA LAM:
+  - Monitor Detail co `Region Summary` tu checks history:
+    - total/up/slow/down theo tung region
+    - avg response time theo region
+    - last check theo region
+  - Bang Checks bo sung cot `Region` de truy vet tung lan check theo vung.
+- CHUA LAM:
+  - Khong con.
+  - Consensus downing logic.
+
+Cap nhat thuc te (C1 - slice 4):
+- DA LAM:
+  - Dashboard co block `Region Summary` de nhin global theo region:
+    - total/up/slow/down_error
+    - avg response time
+    - last check time
+  - Backend them endpoint `GET /api/v1/dashboard/region-summary` (ho tro from/to window).
+  - Frontend Dashboard su dung cung window voi uptime filter de dong bo goc nhin.
+- CHUA LAM:
+  - Khong con (consensus downing da hoan tat).
+
+Cap nhat bo sung (sau smoke va fix nong):
+- DA LAM:
+  - Fix UI public status page route:
+    - Chuan hoa path neu bi nhieu dau `/` lien tiep (tranh trang trang do route resolve loi).
+    - `Public URL` tren UI status pages doi thanh link hop le, mo truc tiep duoc.
+  - Fix an toan test data:
+    - Sua test cleanup nguy hiem khong con `delete(StatusPage)` khong dieu kien.
+    - Cleanup test chi xoa du lieu test da tao (scope theo `user_id` + slug/prefix test).
+    - Da ra soat `backend/tests` de tranh pattern xoa rong du lieu.
+  - Monitors UI:
+    - Them nut `Delete` monitor tren UI (goi `DELETE /api/v1/monitors/{id}`).
+    - Ho tro set region khi create/edit monitor.
+    - Region picker doi tu free-text sang select options va ho tro multi-select.
+    - Last checks hien thi them `region` de phan biet check theo tung vung.
+    - Region options duoc doc tu API `GET /api/v1/probe-regions` (backed by DB table `probe_regions`), khong con suy dien tu monitor string.
+  - Scheduler anti-overlap:
+    - `enqueue_due_monitor_checks` bo qua monitor dang `checking` de giam enqueue chong lenh.
+  - C1 consensus downing logic (backend):
+    - Worker danh gia trang thai monitor theo majority vote tren cac probe region cua cung chu ky.
+    - DOWN chi xac nhan khi so phiếu loi dat nguong da so; nguoc lai monitor giu UP/SLOW de giam false down.
+    - Incident OPEN/CLOSE va still_down reminder dong bo theo ket qua consensus.
+    - Da bo sung unit tests cho consensus status mapping.
+  - Region catalog (backend + migration):
+    - Them table `probe_regions` + seed (`global`, `us-east`, `eu-west`).
+    - Them endpoint `GET /api/v1/probe-regions` cho UI lay danh sach region active.
+    - Gop Alembic heads ve 1 head de dam bao `alembic upgrade head` hoat dong on dinh.
+  - Region contract migration (backend block hoan chinh):
+    - Bo han contract CSV `monitors.probe_region`, thay bang mapping table `monitor_regions` (`monitor_id`, `region_code`).
+    - Migration moi backfill du lieu tu CSV cu sang rows mapping, sau do drop hẳn cot CSV.
+    - API monitor create/update/list/detail chuyen sang field `probe_regions: string[]`.
+    - Request schema monitor dat `extra="forbid"` de stale payload (vd `probe_region`) fail visible, khong fallback am tham.
+    - Worker check doc region tu `monitor_regions` thay vi parse chuoi CSV.
+    - Backend tests chinh (`test_monitors_api.py`, `test_checks_logic.py`) da pass sau migration.
+  - CHUA LAM (block tiep theo):
+    - Khong con.
+  - Region contract migration (frontend dong bo):
+    - `frontend/src/api/monitors.ts` doi contract monitor sang `probe_regions: string[]` cho create/update/list/detail.
+    - `frontend/src/views/MonitorsView.vue` gui `probe_regions[]` truc tiep, bo logic CSV parse/join.
+    - UI list/edit/create region hien thi theo mang region va van giu fallback `global` khi rong.
+    - Da build frontend thanh cong sau thay doi contract.
+  - Active region execution (resource-saving rollout):
+    - Them `monitors.active_region` + migration backfill deterministic tu `monitor_regions`.
+    - Monitor API expose `active_region` trong list/detail, cho phep create/update `active_region` va validate bat buoc thuoc `probe_regions`.
+    - Worker check doi sang `active_region-only` moi chu ky:
+      - Moi monitor chi tao 1 `CheckRun`/chu ky theo active region.
+      - Van luu `check_runs.probe_region` de quan sat/bao cao.
+    - Frontend them UX doi active region:
+      - Monitors list co dropdown active region theo tung monitor (doi la PATCH ngay).
+      - Monitor detail co dropdown active region canh Run Check.
+    - Da verify runtime:
+      - Sau restart clean 1 worker + 1 beat, monitor multi-region chi ghi check moi theo `active_region` duoc chon.
+- DA HOAN TAT:
+  - P0 Runtime health:
+    - Them endpoint `GET /api/v1/runtime/health` (auth):
+      - ping Redis
+      - ping Celery worker
+      - kiem tra beat heartbeat age qua key Redis
+    - Task `ping` cap nhat heartbeat key cho beat/worker health path.
+    - Beat schedule `heartbeat-ping` doi sang chu ky 30s de canh bao som.
+  - P1 UI warning:
+    - Dashboard va Monitors them banner "Runtime Degraded" khi health != ok.
+    - Ly do degrade hien ro (`redis_unreachable`, `celery_worker_unreachable`, `celery_beat_stale_or_missing_heartbeat`).
+  - P2 Queue profile:
+    - Them endpoint `GET /api/v1/runtime/queue-profile?window_minutes=...`:
+      - active monitors
+      - expected checks vs observed checks
+      - timeout ratio / retry ratio
+      - avg interval/timeout/retries
+      - recommendations de giam nghen queue
+    - Dashboard them card "Queue Runtime Profile (60m)" de theo doi va quyet dinh tuning.
+
+## 7) Thu tu thuc thi de giam rui ro
+
+1. A1 schema + API + worker + tests
+2. A2 alert policy + tests timeline
+3. A3 UX hardening nhe
+4. Smoke full flow tren local
+5. Deploy staging/prod va theo doi logs
+
+## 8) Definition of Done (Phase A)
+
+- [x] `accepted_status_codes` hoat dong end-to-end (API + worker + UI)
+- [x] Alert cooldown/reminder hoat dong dung theo policy
+- [x] Khong regression voi monitor mac dinh `200-399` (local tests + manual)
+- [x] UI khong con vung "trong im lang" o chart/history quan trong
+- [ ] (Optional) Smoke checklist pass tren production
+
+## 9) Rủi ro va giam thieu
+
+- Rui ro: parser status code loi -> false UP/DOWN
+  - Giam thieu: unit test parser chi tiet + reject input sai format
+- Rui ro: alert reminder spam
+  - Giam thieu: cooldown + max reminders + integration test timeline
+- Rui ro: deploy migration anh huong monitor cu
+  - Giam thieu: default/backfill an toan + rollback note ro rang
+
+## 10) Go/no-go recommendation
+
+- Nen bat dau ngay Phase A.
+- Chua nen vao multi-location consensus truoc khi alert policy va status policy on dinh.
+
+## 11) Uu tien tiep theo (van hanh queue/Celery)
+
+Muc tieu: ngung tinh trang pending/queued gia, phat hien som su co Redis/Celery, va giam tac nghen do timeout/retry.
+
+P0. Runtime health check cho Redis/Celery:
+- Backend them endpoint health van hanh (VD: `/api/v1/runtime-health`):
+  - ping Redis broker/result backend.
+  - ping Celery worker (co node reply khong).
+  - check beat heartbeat age (co gui task scheduler trong cua so cho phep khong).
+- Output gom `status`, `degraded_reasons`, `timestamp` de UI de parse.
+
+P1. UI canh bao ro rang khi worker/beat mat ket noi:
+- Dashboard/Monitors hien banner canh bao neu runtime health khong `ok`.
+- Neu user bam `Run Check` trong luc runtime degraded:
+  - van cho queue (de khong pha API behavior),
+  - nhung hien canh bao "task co the bi tre do worker/beat/redis khong on dinh".
+
+P2. Profile va tuning interval/timeout/retry:
+- Thu thap metric check run:
+  - p50/p95/p99 `response_time_ms`, timeout rate, retry rate, queue age.
+- Rule tam de tranh nghen:
+  - timeout_seconds <= interval_seconds * 0.6
+  - max_retries toi da 1 cho monitor timeout cao
+  - canh bao monitor co `timeout_ratio` cao.
+- De xuat thay doi default an toan dua tren profile (khong fix cung khi chua co so lieu).
+
+## 12) Runtime hardening (done)
+
+Muc tieu: giam tai ket noi Redis/Celery, chan duplicate process khi restart local, va giu deploy van hanh on dinh voi Docker Compose.
+
+Da lam xong:
+- Harden config Celery (`backend/app/core/config.py`, `backend/app/workers/celery_app.py`):
+  - `celery_broker_pool_limit=2`
+  - `celery_broker_heartbeat_seconds=30`
+  - `celery_broker_health_check_interval_seconds=30`
+  - `celery_worker_prefetch_multiplier=1`
+  - `celery_broker_retry_on_startup=true`
+- Harden command Compose production (`docker-compose.prod.yml`):
+  - worker chay voi `--without-gossip --without-mingle` de giam ket noi/control traffic khong can thiet.
+  - beat co `--pidfile=/tmp/celerybeat.pid` de tranh race process.
+- Them script local idempotent:
+  - `scripts/restart_celery_runtime.ps1`: stop toan bo process celery cu -> verify khong con duplicate -> start lai worker + beat.
+  - `scripts/check_celery_runtime.ps1`: check nhanh so process worker/beat va canh bao duplicate/missing.
+- Cap nhat runbook README:
+  - bo sung lenh restart/check runtime an toan cho local.
+  - nhac ro Celery decoupled va cach tranh pending/queued gia do duplicate process.
+ - Khong them wrapper script moi cho safe-restart (tranh du abstraction):
+  - chot huong dan strict flow truc tiep trong README (preflight -> guarded restart -> health check -> celery strict topology check).
+ - Fix local script issue tren Windows:
+  - bo Unix pidfile arg `--pidfile=/tmp/celerybeat.pid` khoi local restart scripts de beat khong crash.
+
+## 13) Dashboard latency + runtime false-alert (done)
+
+Van de ghi nhan:
+- Dashboard load cham/treo du lieu sau login du cac endpoint dashboard core van nhanh.
+- Runtime health co luc bao `celery_worker_unreachable` du worker van dang chay.
+
+Nguyen nhan goc:
+- Frontend dashboard truoc day dung `Promise.all` cho ca block, nen chi can `GET /runtime/health` cham/timeout la ca page bi doi.
+- Runtime health check worker dung `celery inspect ping` gay false-negative va do tre lon trong mot so local runtime states.
+
+Fix da trien khai:
+- Backend runtime health:
+  - bo path `inspect ping`, chuyen sang worker heartbeat key (`moni:runtime:worker:last_seen_at`) + beat heartbeat key.
+  - them timeout guard cho redis/heartbeat reads de endpoint khong treo dai.
+  - them warm-up fallback sau restart de giam false alert trong cua so dau.
+- Worker ping task:
+  - cap nhat ca beat heartbeat va worker heartbeat trong cung task scheduler.
+- Frontend dashboard:
+  - tach runtime panel khoi critical path:
+    - core dashboard data load truoc.
+    - runtime panel load nen (khong block first paint).
+  - dung `Promise.allSettled` cho runtime calls.
+  - them cache TTL ngan:
+    - runtime health: 10s
+    - queue profile: 15s
+
+Ket qua sau fix:
+- Dashboard khong con bi block boi `runtime/health`.
+- Runtime health phan anh dung hon (giam canh bao `celery_worker_unreachable` gia).
+- UX vao dashboard nhanh hon ro rang, van giu canh bao van hanh.
+
+## 14) Ke hoach smoke con lai (A2 e2e timeline + optional prod smoke)
+
+### 14.1 A2 e2e timeline can hoan tat tren production smoke
+
+Muc tieu: xac nhan day du chuoi su kien alert policy tren moi truong production-like:
+- `incident_opened` -> `still_down` -> `incident_recovered`
+
+Dieu kien truoc khi test:
+- Monitor dang `is_paused=false`, interval nho de de quan sat.
+- SMTP dang hoat dong (neu can doi chieu email thuc).
+- Runtime health `ok` hoac khong co canh bao nghiem trong.
+
+Checklist test:
+1. Tao monitor den endpoint se fail on dinh (hoac tam thoi tro timeout).
+2. Cho monitor chuyen `DOWN`:
+   - `GET /api/v1/monitors/{id}` -> `current_status=down`
+   - `GET /api/v1/monitors/{id}/incidents?limit=20` -> co incident `is_open=true`
+   - `GET /api/v1/monitors/{id}/alerts?limit=20` -> co event `incident_opened`
+3. Giu monitor trong trang thai fail qua cua so reminder:
+   - xac nhan co event `still_down` (khong bi spam qua cooldown/rule max reminders).
+4. Phuc hoi endpoint (tra response accepted code):
+   - `GET /api/v1/monitors/{id}` -> `current_status=up` (hoac `slow`)
+   - incidents -> incident vua roi `is_open=false`, co `resolved_at`
+   - alerts -> co event `incident_recovered`
+
+Expected:
+- Event order dung nghiep vu: opened -> (0..n) still_down -> recovered.
+- Khong co duplicate bat thuong trong cooldown window.
+
+Cap nhat ket qua da chay:
+- DA LAM (local smoke khong de lai du lieu test):
+  - Script: `scripts/smoke_alert_timeline_e2e.py`
+  - Ket qua: PASS du 3 moc `incident_opened`, `still_down`, `incident_recovered`.
+  - Cleanup du lieu test:
+    - xoa theo `monitor_id` cu the (alert_events, incidents, check_runs, monitor_regions, monitor_expiry_status, monitor).
+    - khong co cleanup dien rong, khong co `DELETE` khong `WHERE`.
+
+### 14.2 Optional production smoke (DoD con mo)
+
+- [ ] Chay checklist `planning-docs/SMOKE-CHECKLIST.md` tren deploy.
+- [ ] Luu lai bang chung endpoint response (summary + monitor detail + incidents + alerts).
+- [ ] Chot “Optional smoke pass” de dong hoan toan plan Phase A.

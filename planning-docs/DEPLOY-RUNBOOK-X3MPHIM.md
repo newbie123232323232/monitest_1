@@ -24,6 +24,8 @@ If the domain changes (for example `monitest.top`), keep the same process and up
 - Do not modify unrelated sites on the same VPS.
 - Always back up DB before migration.
 - Keep OAuth URLs in sync with production domain.
+- Celery `worker` and `beat` are separate services by design (not embedded in API process).
+- A deployment is considered healthy only when `api + worker + beat` are all up.
 
 This runbook deploys MONI to `x3mphim.click` without touching `myauction.fun`.
 
@@ -121,6 +123,31 @@ curl -fsS http://127.0.0.1:8010/api/v1/health
 5. Open Dashboard/Monitors.
 6. Trigger `Run Check` and validate state updates.
 7. Optional: run smoke script from local against production URLs.
+
+### 7.1 Swagger/docs exposure policy
+
+- By default, production should keep docs disabled:
+  - `EXPOSE_DOCS_IN_PRODUCTION=false`
+- If temporary API testing via Swagger is required on production:
+  1. Set `EXPOSE_DOCS_IN_PRODUCTION=true` in `.env`.
+  2. Restart API service.
+  3. Verify `/docs` loads normally (CSP for docs route is handled separately in backend middleware).
+  4. After testing, set it back to `false` and restart API.
+
+### 7.2 Celery runtime verification (critical)
+
+Run:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml ps
+```
+
+Expected:
+- `api` is `Up`
+- `worker` is `Up`
+- `beat` is `Up`
+
+If `worker/beat` are down, manual run-check may stay `queued` and scheduled checks will not execute.
 
 ## 8) Rollback
 

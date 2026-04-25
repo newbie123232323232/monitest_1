@@ -13,7 +13,9 @@ export type MonitorItem = {
   current_status: MonitorStatus
   interval_seconds: number
   timeout_seconds: number
-  probe_region: string
+  accepted_status_codes: string
+  probe_regions: string[]
+  active_region: string
   is_paused: boolean
   last_checked_at: string | null
   last_response_time_ms: number | null
@@ -48,6 +50,7 @@ export type ChecksItem = {
   tls_handshake_ms: number | null
   ttfb_ms: number | null
   retry_count: number
+  probe_region: string
 }
 
 export type IncidentItem = {
@@ -58,6 +61,8 @@ export type IncidentItem = {
   status: "open" | "closed"
   open_reason: string | null
   close_reason: string | null
+  last_alert_sent_at?: string | null
+  reminder_count?: number
 }
 
 export type MonitorUptime = {
@@ -73,12 +78,30 @@ export type AlertItem = {
   incident_id: string | null
   monitor_id: string
   channel: "email"
-  event_type: "incident_opened" | "incident_recovered" | "still_down"
+  event_type:
+    | "incident_opened"
+    | "incident_recovered"
+    | "still_down"
+    | "ssl_expiry_warning"
+    | "domain_expiry_warning"
   sent_to: string | null
   sent_at: string | null
   send_status: "sent" | "failed"
   error_message: string | null
   created_at: string
+}
+
+export type MonitorExpiryStatus = {
+  monitor_id: string
+  ssl_expires_at: string | null
+  ssl_days_left: number | null
+  ssl_state: string
+  domain_expires_at: string | null
+  domain_days_left: number | null
+  domain_state: string
+  last_checked_at: string | null
+  last_error: string | null
+  updated_at: string
 }
 
 export async function createMonitor(input: {
@@ -89,7 +112,9 @@ export async function createMonitor(input: {
   timeout_seconds: number
   max_retries: number
   slow_threshold_ms: number
-  probe_region: string
+  accepted_status_codes: string
+  probe_regions: string[]
+  active_region?: string
   detect_content_change: boolean
 }): Promise<MonitorDetail> {
   const res = await authFetch(`${base}/api/v1/monitors`, {
@@ -135,7 +160,9 @@ export async function updateMonitor(
     timeout_seconds: number
     max_retries: number
     slow_threshold_ms: number
-    probe_region: string
+    accepted_status_codes: string
+    probe_regions: string[]
+    active_region: string
     detect_content_change: boolean
     is_paused: boolean
   }>,
@@ -148,8 +175,27 @@ export async function updateMonitor(
   return parseJsonOrThrow(res)
 }
 
+export async function deleteMonitor(monitorId: string): Promise<void> {
+  const res = await authFetch(`${base}/api/v1/monitors/${monitorId}`, { method: "DELETE" })
+  if (!res.ok) {
+    await parseJsonOrThrow(res)
+  }
+}
+
 export async function runCheckNow(monitorId: string): Promise<{ monitor_id: string; task_id: string; status: string }> {
   const res = await authFetch(`${base}/api/v1/monitors/${monitorId}/run-check`, { method: "POST" })
+  return parseJsonOrThrow(res)
+}
+
+export async function runExpiryCheckNow(
+  monitorId: string,
+): Promise<{ monitor_id: string; task_id: string; status: string }> {
+  const res = await authFetch(`${base}/api/v1/monitors/${monitorId}/expiry-check`, { method: "POST" })
+  return parseJsonOrThrow(res)
+}
+
+export async function getMonitorExpiryStatus(monitorId: string): Promise<MonitorExpiryStatus> {
+  const res = await authFetch(`${base}/api/v1/monitors/${monitorId}/expiry`)
   return parseJsonOrThrow(res)
 }
 

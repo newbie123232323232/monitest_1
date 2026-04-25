@@ -11,13 +11,17 @@ import {
   getMonitorAlerts,
   getMonitorChecks,
   getMonitorDetail,
+  getMonitorExpiryStatus,
   getMonitorIncidents,
   getMonitorUptime,
+  runExpiryCheckNow,
   runCheckNow,
+  updateMonitor,
   type AlertItem,
   type ChecksItem,
   type IncidentItem,
   type MonitorDetail,
+  type MonitorExpiryStatus,
   type MonitorUptime,
 } from "../api/monitors"
 
@@ -33,6 +37,7 @@ const uptime = ref<MonitorUptime | null>(null)
 const checks = ref<ChecksItem[]>([])
 const incidents = ref<IncidentItem[]>([])
 const alerts = ref<AlertItem[]>([])
+const expiry = ref<MonitorExpiryStatus | null>(null)
 const checksStatusFilter = ref<"all" | "up" | "slow" | "down" | "pending">("all")
 const checksSort = ref<"finished_desc" | "finished_asc" | "latency_desc" | "latency_asc">("finished_desc")
 const incidentsStatusFilter = ref<"all" | "open" | "closed">("all")
@@ -47,6 +52,7 @@ const rangeTo = ref("")
 const partialErrors = ref<string[]>([])
 const runCheckPhase = ref<"idle" | "queued" | "checking" | "completed" | "failed" | "timeout">("idle")
 const runCheckStatusMsg = ref<string | null>(null)
+const activeRegionDraft = ref("global")
 let runCheckPollTimer: number | null = null
 let runCheckTimeoutTimer: number | null = null
 
@@ -147,6 +153,7 @@ async function loadDetail() {
   try {
     const m = await getMonitorDetail(id)
     monitor.value = m
+    activeRegionDraft.value = m.active_region || (m.probe_regions[0] ?? "global")
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to load monitor detail"
     error.value = msg
@@ -167,9 +174,10 @@ async function loadDetail() {
     getMonitorChecks(id, { limit: 100, ...rq }),
     getMonitorIncidents(id, 20),
     getMonitorAlerts(id, 20),
+    getMonitorExpiryStatus(id),
   ])
 
-  const [uptimeRes, checksRes, incidentsRes, alertsRes] = results
+  const [uptimeRes, checksRes, incidentsRes, alertsRes, expiryRes] = results
   if (uptimeRes.status === "fulfilled") uptime.value = uptimeRes.value
   else {
     uptime.value = null
@@ -201,6 +209,14 @@ async function loadDetail() {
       `alerts: ${alertsRes.reason instanceof Error ? alertsRes.reason.message : "Failed to load alerts"}`,
     )
   }
+  if (expiryRes.status === "fulfilled") expiry.value = expiryRes.value
+  else {
+    expiry.value = null
+    const msg = expiryRes.reason instanceof Error ? expiryRes.reason.message : "Failed to load expiry"
+    if (!msg.toLowerCase().includes("not available yet")) {
+      partialErrors.value.push(`expiry: ${msg}`)
+    }
+  }
 
   if (partialErrors.value.length > 0) {
     error.value = `Some sections failed to load: ${partialErrors.value.join(" | ")}`
@@ -227,6 +243,40 @@ async function handleRunCheck() {
   } catch (e) {
     runCheckPhase.value = "failed"
     error.value = e instanceof Error ? e.message : "Run check failed"
+  }
+}
+
+async function handleActiveRegionChange() {
+  if (!monitor.value) return
+  const allowed = monitor.value.probe_regions ?? []
+  if (!allowed.includes(activeRegionDraft.value)) {
+    error.value = "Active region must be one of monitor regions."
+    activeRegionDraft.value = monitor.value.active_region || allowed[0] || "global"
+    return
+  }
+  actionMsg.value = null
+  error.value = null
+  try {
+    const updated = await updateMonitor(monitor.value.id, { active_region: activeRegionDraft.value })
+    monitor.value = updated
+    activeRegionDraft.value = updated.active_region || (updated.probe_regions[0] ?? "global")
+    actionMsg.value = `Active region updated: ${activeRegionDraft.value}`
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Failed to update active region"
+  }
+}
+
+async function handleRunExpiryCheck() {
+  actionMsg.value = null
+  error.value = null
+  try {
+    const res = await runExpiryCheckNow(monitorId.value)
+    actionMsg.value = `Queued expiry check task ${res.task_id}`
+    window.setTimeout(() => {
+      void loadDetail()
+    }, 2000)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Run expiry check failed"
   }
 }
 
@@ -303,6 +353,13 @@ function checkStatusTone(status: string): "success" | "warning" | "danger" | "ne
   return "danger"
 }
 
+function expiryTone(state: string): "success" | "warning" | "danger" | "neutral" {
+  if (state === "ok") return "success"
+  if (state.startsWith("warn_")) return "warning"
+  if (state === "expired") return "danger"
+  return "neutral"
+}
+
 const filteredChecks = computed(() => {
   let rows = checks.value.slice()
   if (checksStatusFilter.value !== "all") {
@@ -318,6 +375,68 @@ const filteredChecks = computed(() => {
     rows.sort((a, b) => (a.response_time_ms ?? Number.MAX_SAFE_INTEGER) - (b.response_time_ms ?? Number.MAX_SAFE_INTEGER))
   }
   return rows
+})
+
+type RegionSummaryRow = {
+  probe_region: string
+  total_checks: number
+  up_checks: number
+  slow_checks: number
+  down_checks: number
+  avg_response_time_ms: number | null
+  last_finished_at: string | null
+}
+
+const regionSummaryRows = computed<RegionSummaryRow[]>(() => {
+  const grouped = new Map<string, {
+    total: number
+    up: number
+    slow: number
+    down: number
+    latencySum: number
+    latencyCount: number
+    lastFinishedAt: string | null
+  }>()
+  for (const row of checks.value) {
+    const region = (row.probe_region || "global").trim() || "global"
+    const current = grouped.get(region) ?? {
+      total: 0,
+      up: 0,
+      slow: 0,
+      down: 0,
+      latencySum: 0,
+      latencyCount: 0,
+      lastFinishedAt: null,
+    }
+    current.total += 1
+    const st = row.status.toLowerCase()
+    if (st === "up") current.up += 1
+    else if (st === "slow") current.slow += 1
+    else current.down += 1
+    if (typeof row.response_time_ms === "number") {
+      current.latencySum += row.response_time_ms
+      current.latencyCount += 1
+    }
+    if (!current.lastFinishedAt || +new Date(row.finished_at) > +new Date(current.lastFinishedAt)) {
+      current.lastFinishedAt = row.finished_at
+    }
+    grouped.set(region, current)
+  }
+  return Array.from(grouped.entries())
+    .map(([probe_region, agg]) => ({
+      probe_region,
+      total_checks: agg.total,
+      up_checks: agg.up,
+      slow_checks: agg.slow,
+      down_checks: agg.down,
+      avg_response_time_ms: agg.latencyCount > 0 ? agg.latencySum / agg.latencyCount : null,
+      last_finished_at: agg.lastFinishedAt,
+    }))
+    .sort((a, b) => {
+      const bt = a.last_finished_at ? +new Date(a.last_finished_at) : 0
+      const at = b.last_finished_at ? +new Date(b.last_finished_at) : 0
+      return at - bt
+    })
 })
 
 const filteredIncidents = computed(() => {
@@ -405,11 +524,22 @@ onUnmounted(() => {
     <UiCard v-if="monitor && !notFound">
       <UiPanelHeader :title="monitor.name" />
       <p><strong>URL:</strong> {{ monitor.url }}</p>
+      <p><strong>Accepted HTTP codes:</strong> <code>{{ monitor.accepted_status_codes }}</code></p>
+      <p><strong>Regions:</strong> <code>{{ monitor.probe_regions.join(", ") }}</code></p>
+      <p><strong>Active region:</strong> <code>{{ monitor.active_region }}</code></p>
       <p><strong>Status:</strong> <UiBadge :tone="checkStatusTone(monitor.current_status)">● {{ monitor.current_status }}</UiBadge></p>
       <p><strong>Last checked:</strong> {{ fmtDateTime(monitor.last_checked_at) }}</p>
       <p><strong>Last success:</strong> {{ fmtDateTime(monitor.last_success_at) }}</p>
       <p><strong>Last error:</strong> {{ monitor.last_error_message ?? "n/a" }}</p>
       <div class="actions">
+        <label>
+          Active region
+          <select v-model="activeRegionDraft" @change="handleActiveRegionChange">
+            <option v-for="region in monitor.probe_regions" :key="region" :value="region">
+              {{ region }}
+            </option>
+          </select>
+        </label>
         <UiButton
           @click="handleRunCheck"
           :disabled="runCheckPhase === 'queued' || runCheckPhase === 'checking'"
@@ -417,6 +547,27 @@ onUnmounted(() => {
           {{ runCheckPhase === "queued" ? "Queued..." : runCheckPhase === "checking" ? "Checking..." : "Run Check" }}
         </UiButton>
         <UiButton @click="loadDetail" :disabled="loading">Refresh</UiButton>
+      </div>
+    </UiCard>
+
+    <UiCard v-if="monitor && !notFound">
+      <UiPanelHeader title="SSL / Domain Expiry" />
+      <p>
+        <strong>SSL state:</strong>
+        <UiBadge :tone="expiryTone(expiry?.ssl_state ?? 'unknown')">{{ expiry?.ssl_state ?? "unknown" }}</UiBadge>
+        <span class="muted"> · days left: {{ expiry?.ssl_days_left ?? "n/a" }}</span>
+      </p>
+      <p><strong>SSL expires at:</strong> {{ fmtDateTime(expiry?.ssl_expires_at ?? null) }}</p>
+      <p>
+        <strong>Domain state:</strong>
+        <UiBadge :tone="expiryTone(expiry?.domain_state ?? 'unknown')">{{ expiry?.domain_state ?? "unknown" }}</UiBadge>
+        <span class="muted"> · days left: {{ expiry?.domain_days_left ?? "n/a" }}</span>
+      </p>
+      <p><strong>Domain expires at:</strong> {{ fmtDateTime(expiry?.domain_expires_at ?? null) }}</p>
+      <p><strong>Last expiry check:</strong> {{ fmtDateTime(expiry?.last_checked_at ?? null) }}</p>
+      <p><strong>Last expiry error:</strong> {{ expiry?.last_error ?? "n/a" }}</p>
+      <div class="actions">
+        <UiButton @click="handleRunExpiryCheck">Run Expiry Check</UiButton>
       </div>
     </UiCard>
 
@@ -449,7 +600,7 @@ onUnmounted(() => {
         <svg v-if="chartPolyline" viewBox="0 0 640 140" preserveAspectRatio="none" class="chart-svg">
           <polyline :points="chartPolyline" fill="none" stroke="currentColor" stroke-width="2" />
         </svg>
-        <p v-else class="muted">Not enough data for chart in selected window.</p>
+        <p v-else class="muted">Not enough successful checks in selected window.</p>
       </div>
     </UiCard>
 
@@ -475,12 +626,43 @@ onUnmounted(() => {
         </label>
         <UiButton variant="ghost" class="ghost" @click="exportChecksCsv">Export CSV</UiButton>
       </div>
+      <UiPanelHeader title="Region Summary" />
+      <UiTable>
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Region</th>
+              <th>Total</th>
+              <th>UP</th>
+              <th>SLOW</th>
+              <th>DOWN/ERR</th>
+              <th>AVG ms</th>
+              <th>Last check</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in regionSummaryRows" :key="r.probe_region">
+              <td><code>{{ r.probe_region }}</code></td>
+              <td>{{ r.total_checks }}</td>
+              <td>{{ r.up_checks }}</td>
+              <td>{{ r.slow_checks }}</td>
+              <td>{{ r.down_checks }}</td>
+              <td>{{ r.avg_response_time_ms != null ? r.avg_response_time_ms.toFixed(1) : "n/a" }}</td>
+              <td>{{ fmtDateTime(r.last_finished_at) }}</td>
+            </tr>
+            <tr v-if="regionSummaryRows.length === 0">
+              <td class="muted empty-row" colspan="7">No regional checks available yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </UiTable>
       <div class="table-scroll checks-list">
         <UiTable>
         <table class="history-table">
           <thead>
             <tr>
               <th>Finished</th>
+              <th>Region</th>
               <th>Status</th>
               <th>Code</th>
               <th>Total</th>
@@ -493,6 +675,7 @@ onUnmounted(() => {
           <tbody>
             <tr v-for="c in filteredChecks" :key="c.id">
               <td>{{ fmtDateTime(c.finished_at) }}</td>
+              <td><code>{{ c.probe_region || "global" }}</code></td>
               <td><UiBadge :tone="checkStatusTone(c.status)">● {{ c.status }}</UiBadge></td>
               <td>{{ c.status_code ?? "n/a" }}</td>
               <td>{{ c.response_time_ms ?? "n/a" }}ms</td>
@@ -500,6 +683,9 @@ onUnmounted(() => {
               <td>{{ c.tcp_connect_ms ?? "n/a" }}ms</td>
               <td>{{ c.tls_handshake_ms ?? "n/a" }}ms</td>
               <td>{{ c.ttfb_ms ?? "n/a" }}ms</td>
+            </tr>
+            <tr v-if="filteredChecks.length === 0">
+              <td class="muted empty-row" colspan="9">No checks found for this range/filter.</td>
             </tr>
           </tbody>
         </table>
@@ -541,6 +727,9 @@ onUnmounted(() => {
               <td>{{ fmtDateTime(inc.opened_at) }}</td>
               <td>{{ fmtDateTime(inc.closed_at) }}</td>
               <td>{{ inc.open_reason ?? "n/a" }}</td>
+            </tr>
+            <tr v-if="filteredIncidents.length === 0">
+              <td class="muted empty-row" colspan="4">No incidents found.</td>
             </tr>
           </tbody>
         </table>
@@ -584,6 +773,9 @@ onUnmounted(() => {
               <td>{{ a.sent_to ?? "n/a" }}</td>
               <td>{{ fmtDateTime(a.sent_at) }}</td>
             </tr>
+            <tr v-if="filteredAlerts.length === 0">
+              <td class="muted empty-row" colspan="4">No alerts sent yet.</td>
+            </tr>
           </tbody>
         </table>
         </UiTable>
@@ -613,6 +805,7 @@ onUnmounted(() => {
 .history-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .history-table th, .history-table td { text-align: left; padding: 0.35rem 0.45rem; border-bottom: 1px solid var(--border); }
 .history-table th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.empty-row { text-align: center; }
 .checks-list {
   height: 20rem;
   overflow-y: scroll;

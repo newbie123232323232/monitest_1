@@ -47,6 +47,34 @@ async def _send_incident_email_async(monitor_id: str, incident_id: str | None, e
                 f"Checked at: {monitor.last_checked_at}\n"
                 f"Response time: {monitor.last_response_time_ms} ms\n"
             )
+        elif event_enum == AlertEventType.STILL_DOWN:
+            subject = f"[MONI] STILL DOWN: {monitor.name}"
+            body = (
+                f"Monitor: {monitor.name}\n"
+                f"URL: {monitor.url}\n"
+                f"Status: DOWN (ongoing incident)\n"
+                f"Checked at: {monitor.last_checked_at}\n"
+                f"Last error: {monitor.last_error_message or 'N/A'}\n"
+                f"Reminder count: {(incident.reminder_count if incident else 0) + 1}\n"
+            )
+        elif event_enum == AlertEventType.SSL_EXPIRY_WARNING:
+            subject = f"[MONI] SSL EXPIRY WARNING: {monitor.name}"
+            body = (
+                f"Monitor: {monitor.name}\n"
+                f"URL: {monitor.url}\n"
+                f"Event: SSL expiry threshold reached\n"
+                f"Checked at: {monitor.last_checked_at}\n"
+                f"Please review certificate renewal timeline.\n"
+            )
+        elif event_enum == AlertEventType.DOMAIN_EXPIRY_WARNING:
+            subject = f"[MONI] DOMAIN EXPIRY WARNING: {monitor.name}"
+            body = (
+                f"Monitor: {monitor.name}\n"
+                f"URL: {monitor.url}\n"
+                f"Event: Domain expiry threshold reached\n"
+                f"Checked at: {monitor.last_checked_at}\n"
+                f"Please review domain renewal timeline.\n"
+            )
         else:
             subject = f"[MONI] STATUS UPDATE: {monitor.name}"
             body = f"Monitor {monitor.name} event {event_type}"
@@ -69,4 +97,11 @@ async def _send_incident_email_async(monitor_id: str, incident_id: str | None, e
                 error_message=error_message,
             )
         )
+        if incident is not None:
+            if event_enum == AlertEventType.INCIDENT_OPENED:
+                incident.last_alert_sent_at = sent_at
+                incident.reminder_count = 0
+            elif event_enum == AlertEventType.STILL_DOWN:
+                incident.last_alert_sent_at = sent_at
+                incident.reminder_count = (incident.reminder_count or 0) + 1
         await session.commit()

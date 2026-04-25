@@ -75,10 +75,12 @@ async def test_monitor_ownership_filter_search_and_run_check(monkeypatch):
                 "url": "https://example.com",
                 "interval_seconds": 60,
                 "timeout_seconds": 10,
+                "accepted_status_codes": "200-299,301,302",
             },
         )
         assert create_a.status_code == 201
         monitor_a_id = create_a.json()["id"]
+        assert create_a.json()["accepted_status_codes"] == "200-299,301,302"
 
         create_b = await client.post(
             "/api/v1/monitors",
@@ -120,11 +122,32 @@ async def test_monitor_ownership_filter_search_and_run_check(monkeypatch):
         assert run_check.status_code == 202
         assert run_check.json()["status"] == "queued"
         assert run_check.json()["monitor_id"] == monitor_a_id
+
+        updated = await client.patch(
+            f"/api/v1/monitors/{monitor_a_id}",
+            headers={"x-test-user": "a"},
+            json={"accepted_status_codes": "200,201,204-299"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["accepted_status_codes"] == "200,201,204-299"
+
+        invalid_active_region = await client.patch(
+            f"/api/v1/monitors/{monitor_a_id}",
+            headers={"x-test-user": "a"},
+            json={"active_region": "ap-south"},
+        )
+        assert invalid_active_region.status_code == 400
+        assert "active_region must be one of probe_regions" in invalid_active_region.json()["message"]
     finally:
         await client.aclose()
         app.dependency_overrides.clear()
         async with AsyncSessionLocal() as session:
-            await session.execute(delete(Monitor).where(Monitor.name.like("it-%")))
+            await session.execute(
+                delete(Monitor).where(
+                    Monitor.user_id.in_([user_a_id, user_b_id]),
+                    Monitor.name.in_(["it-owner-a", "it-owner-b"]),
+                )
+            )
             await session.execute(
                 delete(User).where(User.email.in_(["owner-a@test.local", "owner-b@test.local"]))
             )
@@ -180,6 +203,19 @@ async def test_monitor_create_rejects_internal_targets() -> None:
         )
         assert blocked_private_ip.status_code == 400
         assert "private/internal IP" in blocked_private_ip.json()["message"]
+
+        invalid_codes = await client.post(
+            "/api/v1/monitors",
+            json={
+                "name": "it-ssrf-invalid-codes",
+                "url": "https://example.com",
+                "interval_seconds": 60,
+                "timeout_seconds": 10,
+                "accepted_status_codes": "200-abc",
+            },
+        )
+        assert invalid_codes.status_code == 400
+        assert "invalid status code range" in invalid_codes.json()["message"]
     finally:
         await client.aclose()
         app.dependency_overrides.clear()

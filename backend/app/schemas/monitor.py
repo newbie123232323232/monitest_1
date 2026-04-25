@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from app.models.monitor import (
     AlertChannel,
@@ -15,6 +15,7 @@ from app.models.monitor import (
 
 
 class MonitorCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
     url: HttpUrl
     monitor_type: MonitorType = MonitorType.HTTP
@@ -22,18 +23,23 @@ class MonitorCreateRequest(BaseModel):
     timeout_seconds: int = Field(default=10, ge=1, le=120)
     max_retries: int = Field(default=2, ge=0, le=5)
     slow_threshold_ms: int = Field(default=1500, ge=100, le=60000)
-    probe_region: str = Field(default="global", min_length=2, max_length=64)
+    accepted_status_codes: str = Field(default="200-399", min_length=3, max_length=255)
+    probe_regions: list[str] = Field(default_factory=lambda: ["global"], min_length=1)
+    active_region: str | None = Field(default=None, min_length=2, max_length=64)
     detect_content_change: bool = False
 
 
 class MonitorUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=120)
     url: HttpUrl | None = None
     interval_seconds: int | None = Field(default=None, ge=30, le=86400)
     timeout_seconds: int | None = Field(default=None, ge=1, le=120)
     max_retries: int | None = Field(default=None, ge=0, le=5)
     slow_threshold_ms: int | None = Field(default=None, ge=100, le=60000)
-    probe_region: str | None = Field(default=None, min_length=2, max_length=64)
+    accepted_status_codes: str | None = Field(default=None, min_length=3, max_length=255)
+    probe_regions: list[str] | None = None
+    active_region: str | None = Field(default=None, min_length=2, max_length=64)
     detect_content_change: bool | None = None
     is_paused: bool | None = None
 
@@ -46,7 +52,9 @@ class MonitorListItem(BaseModel):
     current_status: MonitorStatus
     interval_seconds: int
     timeout_seconds: int
-    probe_region: str
+    accepted_status_codes: str
+    probe_regions: list[str]
+    active_region: str
     is_paused: bool
     last_checked_at: datetime | None
     last_response_time_ms: int | None
@@ -65,7 +73,9 @@ class MonitorDetailResponse(BaseModel):
     timeout_seconds: int
     max_retries: int
     slow_threshold_ms: int
-    probe_region: str
+    accepted_status_codes: str
+    probe_regions: list[str]
+    active_region: str
     detect_content_change: bool
     is_paused: bool
     current_status: MonitorStatus
@@ -108,6 +118,7 @@ class CheckRunItemResponse(BaseModel):
     tls_handshake_ms: int | None
     ttfb_ms: int | None
     retry_count: int
+    probe_region: str
     created_at: datetime
 
 
@@ -121,6 +132,8 @@ class IncidentItemResponse(BaseModel):
     close_reason: str | None
     first_failed_check_id: uuid.UUID | None
     last_failed_check_id: uuid.UUID | None
+    last_alert_sent_at: datetime | None = None
+    reminder_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -152,6 +165,16 @@ class DashboardSummaryResponse(BaseModel):
     uptime_total_checks: int | None = None
     uptime_success_checks: int | None = None
     average_uptime_percent: float | None = None
+
+
+class DashboardRegionSummaryItem(BaseModel):
+    probe_region: str
+    total_checks: int
+    up_checks: int
+    slow_checks: int
+    down_error_checks: int
+    avg_response_time_ms: float | None
+    last_finished_at: datetime | None
 
 
 class MonitorUptimeResponse(BaseModel):

@@ -32,6 +32,9 @@ class User(Base):
     monitors: Mapped[list["Monitor"]] = relationship(
         "Monitor", back_populates="user", cascade="all, delete-orphan"
     )
+    status_pages: Mapped[list["StatusPage"]] = relationship(
+        "StatusPage", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class RefreshToken(Base):

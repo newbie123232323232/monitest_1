@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     redis_url: str
     celery_broker_url: str
     celery_result_backend: str
+    celery_broker_pool_limit: int = 2
+    celery_broker_heartbeat_seconds: int = 30
+    celery_broker_health_check_interval_seconds: int = 30
+    celery_worker_prefetch_multiplier: int = 1
+    celery_broker_retry_on_startup: bool = True
 
     jwt_secret: str
     jwt_access_expire_minutes: int = 15
@@ -42,6 +47,10 @@ class Settings(BaseSettings):
 
     email_verify_token_expire_hours: int = 48
     run_check_min_interval_seconds: int = 15
+    alert_cooldown_minutes: int = 10
+    alert_still_down_reminder_minutes: int = 30
+    alert_max_reminders_per_incident: int = 24
+    runtime_beat_stale_seconds: int = 120
     auth_rate_limit_window_seconds: int = 60
     auth_rate_limit_max_attempts: int = 10
     enforce_https_redirect: bool = False

@@ -60,6 +60,8 @@ class AlertEventType(str, enum.Enum):
     INCIDENT_OPENED = "incident_opened"
     INCIDENT_RECOVERED = "incident_recovered"
     STILL_DOWN = "still_down"
+    SSL_EXPIRY_WARNING = "ssl_expiry_warning"
+    DOMAIN_EXPIRY_WARNING = "domain_expiry_warning"
 
 
 class AlertSendStatus(str, enum.Enum):
@@ -85,7 +87,14 @@ class Monitor(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     slow_threshold_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=1500)
-    probe_region: Mapped[str] = mapped_column(String(64), nullable=False, default="global")
+    accepted_status_codes: Mapped[str] = mapped_column(String(255), nullable=False, default="200-399")
+    active_region: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("probe_regions.code", ondelete="RESTRICT"),
+        nullable=False,
+        default="global",
+        index=True,
+    )
     detect_content_change: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     current_status: Mapped[MonitorStatus] = mapped_column(
@@ -116,6 +125,25 @@ class Monitor(Base):
     alert_events: Mapped[list["AlertEvent"]] = relationship(
         "AlertEvent", back_populates="monitor", cascade="all, delete-orphan"
     )
+    monitor_regions: Mapped[list["MonitorRegion"]] = relationship(
+        "MonitorRegion", back_populates="monitor", cascade="all, delete-orphan"
+    )
+
+
+class MonitorRegion(Base):
+    __tablename__ = "monitor_regions"
+
+    monitor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("monitors.id", ondelete="CASCADE"), primary_key=True
+    )
+    region_code: Mapped[str] = mapped_column(
+        String(64), ForeignKey("probe_regions.code", ondelete="RESTRICT"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    monitor: Mapped[Monitor] = relationship("Monitor", back_populates="monitor_regions")
 
 
 class CheckRun(Base):
@@ -143,6 +171,7 @@ class CheckRun(Base):
     tls_handshake_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ttfb_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    probe_region: Mapped[str] = mapped_column(String(64), nullable=False, default="global")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -172,6 +201,8 @@ class Incident(Base):
     last_failed_check_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("check_runs.id", ondelete="SET NULL"), nullable=True
     )
+    last_alert_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reminder_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

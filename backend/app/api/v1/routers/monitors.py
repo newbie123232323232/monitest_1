@@ -9,7 +9,9 @@ from app.api.v1.deps_auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.monitor import AlertEvent, CheckRun, Incident, Monitor, MonitorStatus
+from app.models.monitor_expiry import MonitorExpiryStatus
 from app.models.user import User
+from app.schemas.monitor_expiry import MonitorExpiryStatusResponse
 from app.schemas.monitor import (
     AlertEventItemResponse,
     CheckRunItemResponse,
@@ -24,21 +26,30 @@ from app.schemas.monitor import (
 )
 from app.services.monitor_service import (
     MonitorValidationError,
+    get_monitor_probe_regions_map,
     get_monitor_risk_fields,
     get_monitor_by_id,
     enforce_run_check_rate_limit,
+    normalize_active_region,
+    normalize_probe_regions,
+    normalize_accepted_status_codes,
     list_monitors,
+    set_monitor_regions,
+    resolve_active_region,
+    validate_probe_regions_exist,
     validate_monitor_timing,
     validate_monitor_url_host,
 )
 from app.services.uptime_service import clamp_uptime_range, default_uptime_window, uptime_stats_for_monitor
 from app.workers.tasks.checks import check_http_monitor
+from app.workers.tasks.expiry import _check_monitor_expiry_async, check_monitor_expiry
 
 router = APIRouter(prefix="/monitors", tags=["monitors"])
 
 
 def to_monitor_item(
     m: Monitor,
+    probe_regions: list[str],
     last_failure_at: datetime | None = None,
     consecutive_failures: int = 0,
 ) -> MonitorListItem:
@@ -50,7 +61,9 @@ def to_monitor_item(
         current_status=m.current_status,
         interval_seconds=m.interval_seconds,
         timeout_seconds=m.timeout_seconds,
-        probe_region=m.probe_region,
+        accepted_status_codes=m.accepted_status_codes,
+        probe_regions=probe_regions,
+        active_region=m.active_region,
         is_paused=m.is_paused,
         last_checked_at=m.last_checked_at,
         last_response_time_ms=m.last_response_time_ms,
@@ -60,7 +73,7 @@ def to_monitor_item(
     )
 
 
-def to_monitor_detail(m: Monitor) -> MonitorDetailResponse:
+def to_monitor_detail(m: Monitor, probe_regions: list[str]) -> MonitorDetailResponse:
     return MonitorDetailResponse(
         id=m.id,
         user_id=m.user_id,
@@ -71,7 +84,9 @@ def to_monitor_detail(m: Monitor) -> MonitorDetailResponse:
         timeout_seconds=m.timeout_seconds,
         max_retries=m.max_retries,
         slow_threshold_ms=m.slow_threshold_ms,
-        probe_region=m.probe_region,
+        accepted_status_codes=m.accepted_status_codes,
+        probe_regions=probe_regions,
+        active_region=m.active_region,
         detect_content_change=m.detect_content_change,
         is_paused=m.is_paused,
         current_status=m.current_status,
@@ -95,6 +110,10 @@ async def create_monitor(
     try:
         validate_monitor_timing(body.interval_seconds, body.timeout_seconds)
         validate_monitor_url_host(str(body.url))
+        accepted_status_codes = normalize_accepted_status_codes(body.accepted_status_codes)
+        probe_regions = normalize_probe_regions(body.probe_regions)
+        active_region = resolve_active_region(normalize_active_region(body.active_region), probe_regions)
+        await validate_probe_regions_exist(session, probe_regions)
     except MonitorValidationError as e:
         raise HTTPException(status_code=400, detail=e.message) from e
 
@@ -107,15 +126,18 @@ async def create_monitor(
         timeout_seconds=body.timeout_seconds,
         max_retries=body.max_retries,
         slow_threshold_ms=body.slow_threshold_ms,
-        probe_region=body.probe_region.strip(),
+        accepted_status_codes=accepted_status_codes,
+        active_region=active_region,
         detect_content_change=body.detect_content_change,
         current_status=MonitorStatus.PENDING,
     )
     session.add(monitor)
+    await session.flush()
+    await set_monitor_regions(session, monitor.id, probe_regions)
     await session.commit()
     await session.refresh(monitor)
     check_http_monitor.delay(str(monitor.id))
-    return to_monitor_detail(monitor)
+    return to_monitor_detail(monitor, probe_regions)
 
 
 @router.get("", response_model=MonitorListResponse)
@@ -136,10 +158,12 @@ async def get_monitors(
         page_size=page_size,
     )
     risk_map = await get_monitor_risk_fields(session=session, monitor_ids=[item.id for item in items])
+    region_map = await get_monitor_probe_regions_map(session=session, monitor_ids=[item.id for item in items])
     return MonitorListResponse(
         items=[
             to_monitor_item(
                 item,
+                probe_regions=region_map.get(item.id, []),
                 last_failure_at=risk_map.get(item.id, (None, 0))[0],
                 consecutive_failures=risk_map.get(item.id, (None, 0))[1],
             )
@@ -160,7 +184,8 @@ async def get_monitor(
     monitor = await get_monitor_by_id(session=session, user_id=user.id, monitor_id=monitor_id)
     if monitor is None:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    return to_monitor_detail(monitor)
+    region_map = await get_monitor_probe_regions_map(session=session, monitor_ids=[monitor.id])
+    return to_monitor_detail(monitor, region_map.get(monitor.id, []))
 
 
 @router.patch("/{monitor_id}", response_model=MonitorDetailResponse)
@@ -181,6 +206,13 @@ async def update_monitor(
         validate_monitor_timing(new_interval, new_timeout)
         if "url" in data and data["url"] is not None:
             validate_monitor_url_host(str(data["url"]))
+        if "accepted_status_codes" in data and data["accepted_status_codes"] is not None:
+            data["accepted_status_codes"] = normalize_accepted_status_codes(data["accepted_status_codes"])
+        if "probe_regions" in data and data["probe_regions"] is not None:
+            data["probe_regions"] = normalize_probe_regions(data["probe_regions"])
+            await validate_probe_regions_exist(session, data["probe_regions"])
+        if "active_region" in data:
+            data["active_region"] = normalize_active_region(data["active_region"])
     except MonitorValidationError as e:
         raise HTTPException(status_code=400, detail=e.message) from e
 
@@ -196,8 +228,24 @@ async def update_monitor(
         monitor.max_retries = data["max_retries"]
     if "slow_threshold_ms" in data and data["slow_threshold_ms"] is not None:
         monitor.slow_threshold_ms = data["slow_threshold_ms"]
-    if "probe_region" in data and data["probe_region"] is not None:
-        monitor.probe_region = data["probe_region"].strip()
+    if "accepted_status_codes" in data and data["accepted_status_codes"] is not None:
+        monitor.accepted_status_codes = data["accepted_status_codes"]
+    if "probe_regions" in data and data["probe_regions"] is not None:
+        probe_regions = data["probe_regions"]
+        await set_monitor_regions(session, monitor.id, probe_regions)
+        fallback_active = normalize_active_region(monitor.active_region)
+        desired_active = data.get("active_region", fallback_active)
+        try:
+            monitor.active_region = resolve_active_region(desired_active, probe_regions)
+        except MonitorValidationError as e:
+            raise HTTPException(status_code=400, detail=e.message) from e
+    elif "active_region" in data and data["active_region"] is not None:
+        region_map = await get_monitor_probe_regions_map(session=session, monitor_ids=[monitor.id])
+        probe_regions = region_map.get(monitor.id, [])
+        try:
+            monitor.active_region = resolve_active_region(data["active_region"], probe_regions)
+        except MonitorValidationError as e:
+            raise HTTPException(status_code=400, detail=e.message) from e
     if "detect_content_change" in data and data["detect_content_change"] is not None:
         monitor.detect_content_change = data["detect_content_change"]
     if "is_paused" in data and data["is_paused"] is not None:
@@ -206,7 +254,8 @@ async def update_monitor(
 
     await session.commit()
     await session.refresh(monitor)
-    return to_monitor_detail(monitor)
+    region_map = await get_monitor_probe_regions_map(session=session, monitor_ids=[monitor.id])
+    return to_monitor_detail(monitor, region_map.get(monitor.id, []))
 
 
 @router.delete("/{monitor_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -326,6 +375,7 @@ async def get_monitor_checks(
             tls_handshake_ms=item.tls_handshake_ms,
             ttfb_ms=item.ttfb_ms,
             retry_count=item.retry_count,
+            probe_region=item.probe_region,
             created_at=item.created_at,
         )
         for item in rows.scalars().all()
@@ -359,6 +409,8 @@ async def get_monitor_incidents(
             close_reason=i.close_reason,
             first_failed_check_id=i.first_failed_check_id,
             last_failed_check_id=i.last_failed_check_id,
+            last_alert_sent_at=i.last_alert_sent_at,
+            reminder_count=i.reminder_count,
             created_at=i.created_at,
             updated_at=i.updated_at,
         )
@@ -397,3 +449,47 @@ async def get_monitor_alert_events(
         )
         for a in rows.scalars().all()
     ]
+
+
+@router.post("/{monitor_id}/expiry-check", response_model=RunCheckResponse, status_code=status.HTTP_202_ACCEPTED)
+async def run_monitor_expiry_check_now(
+    monitor_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RunCheckResponse:
+    monitor = await get_monitor_by_id(session=session, user_id=user.id, monitor_id=monitor_id)
+    if monitor is None:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    task = check_monitor_expiry.delay(str(monitor.id))
+    return RunCheckResponse(monitor_id=monitor.id, task_id=task.id, status="queued")
+
+
+@router.get("/{monitor_id}/expiry", response_model=MonitorExpiryStatusResponse)
+async def get_monitor_expiry_status(
+    monitor_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> MonitorExpiryStatusResponse:
+    monitor = await get_monitor_by_id(session=session, user_id=user.id, monitor_id=monitor_id)
+    if monitor is None:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    row = await session.get(MonitorExpiryStatus, monitor.id)
+    if row is None:
+        # First-read bootstrap: run one inline check so clients do not stay in
+        # indefinite "queued then 404" flow when background workers are delayed.
+        await _check_monitor_expiry_async(str(monitor.id))
+        row = await session.get(MonitorExpiryStatus, monitor.id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Expiry status not available yet")
+    return MonitorExpiryStatusResponse(
+        monitor_id=row.monitor_id,
+        ssl_expires_at=row.ssl_expires_at,
+        ssl_days_left=row.ssl_days_left,
+        ssl_state=row.ssl_state,
+        domain_expires_at=row.domain_expires_at,
+        domain_days_left=row.domain_days_left,
+        domain_state=row.domain_state,
+        last_checked_at=row.last_checked_at,
+        last_error=row.last_error,
+        updated_at=row.updated_at,
+    )

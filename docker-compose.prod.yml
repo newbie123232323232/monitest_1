@@ -54,7 +54,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["celery", "-A", "app.workers.celery_app", "worker", "-l", "info"]
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "-l", "info", "--without-gossip", "--without-mingle"]
 
   beat:
     image: ${BACKEND_IMAGE}
@@ -66,7 +66,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["celery", "-A", "app.workers.celery_app", "beat", "-l", "info"]
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "-l", "info", "--pidfile=/tmp/celerybeat.pid"]
 
   frontend:
     image: ${FRONTEND_IMAGE}

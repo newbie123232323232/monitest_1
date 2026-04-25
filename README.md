@@ -87,7 +87,7 @@ Relationship summary:
 cd backend
 py -3 -m pip install -e ".[dev]"
 py -3 -m alembic upgrade head
-py -3 -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8010
+py -3 -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
 ### Frontend
@@ -106,12 +106,107 @@ py -3 -m celery -A app.workers.celery_app worker -P solo -l info
 py -3 -m celery -A app.workers.celery_app beat -l info
 ```
 
+For safer local restarts (avoid duplicate worker/beat):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\restart_celery_runtime.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\check_celery_runtime.ps1
+```
+
+For full local restart with port guards (API + Celery + Frontend):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\restart_full_stack.ps1
+```
+
+Optional flags:
+- `-NoFrontend` restart only backend + celery
+- `-NoCelery` restart only backend + frontend
+- `-NoBackend` restart only frontend + celery
+- `-ForceKillPortOwners` terminate unknown processes holding guarded ports
+
+Recommended strict restart flow (manual, no extra wrapper script):
+1. Preflight:
+   - ensure repo root has `.env`
+   - ensure no stale process is holding API/Frontend ports unexpectedly
+2. Run guarded restart:
+   - `powershell -ExecutionPolicy Bypass -File .\scripts\restart_full_stack.ps1 -ForceKillPortOwners`
+3. Health verification:
+   - open `http://127.0.0.1:8011/api/v1/health` and confirm HTTP 200
+4. Runtime topology verification:
+   - run `powershell -ExecutionPolicy Bypass -File .\scripts\check_celery_runtime.ps1 -Strict -Retries 4 -RetryDelaySeconds 2`
+   - expected: worker and beat are both present, no strict failure
+5. Final readiness:
+   - API docs reachable: `http://127.0.0.1:8011/docs`
+   - frontend reachable (if started): `http://127.0.0.1:5173`
+
+Why this flow is mandatory:
+- `restart_full_stack.ps1` guarantees idempotent stop/start + port guard.
+- `/api/v1/health` confirms API process is actually serving, not just spawned.
+- strict celery check catches false-green starts (e.g., beat crash after spawn).
+- local Windows scripts intentionally avoid Unix pidfile paths for celery beat.
+
+Onboarding copy-paste flows:
+
+Flow A - restart full local stack (API + Celery + Frontend):
+
+```powershell
+# 1) guarded restart (kill unknown port owners if needed)
+powershell -ExecutionPolicy Bypass -File .\scripts\restart_full_stack.ps1 -ForceKillPortOwners
+
+# 2) backend health must be 200
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8011/api/v1/health
+
+# 3) celery topology must be healthy
+powershell -ExecutionPolicy Bypass -File .\scripts\check_celery_runtime.ps1 -Strict -Retries 4 -RetryDelaySeconds 2
+```
+
+Expected result:
+- backend responds `200` at `/api/v1/health`
+- celery check prints worker and beat present, no strict failure
+- frontend reachable at `http://127.0.0.1:5173`
+
+One-command local pre-deploy smoke gate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke_local_gate.ps1
+```
+
+Notes:
+- This script runs guarded restart and then runs `scripts/smoke-check.ps1`.
+- For full authenticated smoke (dashboard/monitors/runtime), pass `-AccessToken "<token>"`.
+- Optional monitor-detail/checks/uptime checks remain available in `scripts/smoke-check.ps1` via `-MonitorId`.
+- To skip restart and only run checks: `-SkipRestart`
+
+Flow B - restart backend + celery only (no frontend):
+
+```powershell
+# 1) restart without frontend
+powershell -ExecutionPolicy Bypass -File .\scripts\restart_full_stack.ps1 -NoFrontend -ForceKillPortOwners
+
+# 2) backend health
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8011/api/v1/health
+
+# 3) celery strict check
+powershell -ExecutionPolicy Bypass -File .\scripts\check_celery_runtime.ps1 -Strict -Retries 4 -RetryDelaySeconds 2
+```
+
+Expected result:
+- backend and celery ready
+- Swagger reachable at `http://127.0.0.1:8011/docs`
+- frontend is intentionally not started in this flow
+
+Port note (important):
+- Local guarded runtime defaults API to `8011` for stability on Windows dev.
+- Production deploy stack continues using API port `8010` behind Nginx/compose.
+- If you must run local API on another port, pass `-BackendPort` to `restart_full_stack.ps1`.
+
 ## Production deployment quickstart
 
 1. Prepare VPS folders (`/opt/moni`, `/opt/moni/backups`).
 2. Configure `.env` from `.env.prod.example`.
 3. Configure Nginx site and issue TLS certificate.
-4. Start compose stack and run migrations.
+4. Start compose stack and run mig  rations.
 5. Verify health endpoint and login flows.
 6. Configure GitHub Actions secrets for CI deploy.
 
@@ -139,8 +234,31 @@ See detailed runbook in `planning-docs/DEPLOY-RUNBOOK-X3MPHIM.md` (adapt domain 
 ### 5) Redis/Celery mismatches
 - Keep `REDIS_URL`, `CELERY_BROKER_URL`, and `CELERY_RESULT_BACKEND` aligned.
 - For internal Docker Redis, use `redis://redis:6379/0`.
+- Celery is intentionally decoupled from API runtime:
+  - `run-check` endpoint only enqueues task (`queued`)
+  - actual execution requires `worker` (and `beat` for scheduled checks)
+  - in local/dev, start `uvicorn + worker + beat` together for full behavior
+- To avoid recurring `queued/pending` caused by duplicated local processes:
+  - always restart Celery via `scripts/restart_celery_runtime.ps1`
+  - verify process count via `scripts/check_celery_runtime.ps1`
+  - keep local Redis/Celery separate from production broker
 
-### 6) Backup script fails with unbound env vars
+### 8) Dashboard appears slow even when API is up
+- Root cause seen in local hardening phase: dashboard core endpoints were fast, but runtime health path could be slow/intermittent and block page rendering.
+- Current mitigation:
+  - runtime panel is not in dashboard critical render path
+  - runtime calls use `allSettled` and short TTL cache (health 10s, queue profile 15s)
+  - backend runtime health uses heartbeat-based worker/beat checks with timeout guards
+- Expected behavior now:
+  - dashboard core cards load first
+  - runtime card may refresh slightly later without freezing whole page
+
+### 6) Swagger docs appear blank or unavailable
+- In production, docs are disabled by default with `EXPOSE_DOCS_IN_PRODUCTION=false`.
+- If enabled for temporary testing, ensure API is restarted and `/docs` route is reachable.
+- Docs route uses a dedicated CSP path policy; API routes keep strict CSP hardening.
+
+### 7) Backup script fails with unbound env vars
 - Ensure backup script loads `.env` and references `POSTGRES_USER`/`POSTGRES_DB` from env.
 - Verify compressed backup integrity (`gzip -t`).
 

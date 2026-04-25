@@ -1,5 +1,5 @@
 param(
-  [string]$ApiBase = "http://127.0.0.1:8010",
+  [string]$ApiBase = "http://127.0.0.1:8011",
   [string]$FrontendBase = "http://127.0.0.1:5173",
   [string]$AccessToken = "",
   [string]$MonitorId = ""

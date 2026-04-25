@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.core.config import settings
 from app.models.base import Base
 import app.models.monitor  # noqa: F401
+import app.models.monitor_expiry  # noqa: F401
+import app.models.probe_region  # noqa: F401
+import app.models.status_page  # noqa: F401
 import app.models.user  # noqa: F401
 
 config = context.config

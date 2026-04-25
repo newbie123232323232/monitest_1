@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.workers.tasks.checks",
         "app.workers.tasks.notify",
         "app.workers.tasks.scheduler",
+        "app.workers.tasks.expiry",
     ],
 )
 
@@ -21,6 +22,13 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    broker_pool_limit=settings.celery_broker_pool_limit,
+    broker_heartbeat=settings.celery_broker_heartbeat_seconds,
+    broker_connection_retry_on_startup=settings.celery_broker_retry_on_startup,
+    worker_prefetch_multiplier=settings.celery_worker_prefetch_multiplier,
+    broker_transport_options={
+        "health_check_interval": settings.celery_broker_health_check_interval_seconds,
+    },
 )
 
 celery_app.conf.beat_schedule = {
@@ -30,6 +38,10 @@ celery_app.conf.beat_schedule = {
     },
     "heartbeat-ping": {
         "task": "app.workers.tasks.ping.ping",
-        "schedule": crontab(minute="*/5"),
+        "schedule": 30.0,
+    },
+    "check-expiry-status": {
+        "task": "app.workers.tasks.expiry.check_expiry_for_all_http_monitors",
+        "schedule": crontab(minute="*/30"),
     },
 }

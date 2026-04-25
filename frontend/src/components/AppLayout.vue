@@ -28,6 +28,7 @@ async function handleLogout() {
       <nav class="app-nav">
         <RouterLink to="/dashboard">Dashboard</RouterLink>
         <RouterLink to="/monitors">Monitors</RouterLink>
+        <RouterLink to="/status-pages">Status Pages</RouterLink>
       </nav>
       <button type="button" class="signout" @click="handleLogout" :disabled="loggingOut">
         {{ loggingOut ? "…" : "Sign out" }}
